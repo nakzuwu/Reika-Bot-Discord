@@ -1,14 +1,26 @@
 import discord
+import os, random, json, datetime
+import requests
+import re
+import aiohttp
 from discord.ext import commands
 import yt_dlp as youtube_dl
+from datetime import datetime
+from discord import File
 import asyncio
 from collections import deque
 from config import BOT_TOKEN, PREFIX
+import moviepy as mp
+from PIL import Image
 
 # Suppress noise
 # youtube_dl.utils.bug_reports_message = lambda: ''
 
-# Configuration
+# ============================
+# CONFIGURATION & CONSTANTS
+# ============================
+
+# YouTube DL Configuration
 ytdl_format_options = {
     'format': 'bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -23,12 +35,22 @@ ytdl_format_options = {
     'source_address': '0.0.0.0',
 }
 
+# Paths
+DOWNLOADS_PATH = "downloads"
+os.makedirs(DOWNLOADS_PATH, exist_ok=True)
+
+# FFmpeg Options
 ffmpeg_options = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn',
 }
 
+# Global instances
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
+
+# ============================
+# DATA MODELS
+# ============================
 
 class Song:
     __slots__ = ('title', 'url', 'duration', 'thumbnail', 'requester')
@@ -73,6 +95,10 @@ class MusicPlayer:
             return song
         return None
 
+# ============================
+# BOT SETUP
+# ============================
+
 player = MusicPlayer()
 
 intents = discord.Intents.default()
@@ -84,6 +110,10 @@ bot = commands.Bot(
     intents=intents,
     help_command=None
 )
+
+# ============================
+# MUSIC CORE FUNCTIONS
+# ============================
 
 def after_playing(error):
     if error:
@@ -122,10 +152,19 @@ async def play_song(voice_client, song):
         if voice_client.is_connected():
             voice_client.stop()
 
-@bot.event
-async def on_ready():
-    print(f'Logged in as {bot.user} (ID: {bot.user.id})')
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="n.help"))
+async def play_next(ctx):
+    """Play the next song in queue"""
+    if player.queue:
+        next_song = player.queue.popleft()
+        await play_song(ctx.voice_client, next_song)
+        embed = discord.Embed(
+            description=f"🎶 Now playing: [{next_song.title}]({next_song.url})",
+            color=0x00ff00
+        )
+        embed.set_footer(text=f"Requested by {next_song.requester.display_name}")
+        if next_song.thumbnail:
+            embed.set_thumbnail(url=next_song.thumbnail)
+        await ctx.send(embed=embed)
 
 async def process_playlist(url, requester):
     """Extract all songs from a playlist"""
@@ -144,6 +183,327 @@ async def process_playlist(url, requester):
     except Exception as e:
         print(f"Playlist error: {e}")
         return None
+
+# ============================
+# MEDIA DOWNLOAD FUNCTIONS
+# ============================
+
+async def download_media(ctx, url, mode):
+    await ctx.send("⏳ Sedang memproses permintaanmu...")
+
+    DOWNLOAD_LIMIT_MB = 10
+    DOWNLOAD_LIMIT_BYTES = DOWNLOAD_LIMIT_MB * 1024 * 1024
+
+    ydl_opts = {
+        'outtmpl': os.path.join(DOWNLOADS_PATH, '%(title)s.%(ext)s'),
+        'quiet': True,
+        'noplaylist': True,
+        'no_warnings': True,
+    }
+
+    # Tentukan mode
+    if mode == 'yt':
+        # Fokus ke 360p–480p tapi tetap ada audio
+        ydl_opts.update({
+            'format': (
+                'bestvideo[height<=480][height>=360][vcodec*=avc1]+bestaudio[ext=m4a]/'
+                'best[height<=480][ext=mp4]'
+            ),
+            'merge_output_format': 'mp4'
+        })
+    elif mode == 'ytmp3':
+        ydl_opts.update({
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '128',
+            }]
+        })
+    elif mode == 'fb':
+        # Facebook - format terbaik yang tersedia
+        ydl_opts.update({
+            'format': 'best[ext=mp4]/best',
+            'merge_output_format': 'mp4'
+        })
+    elif mode == 'ig':
+        # Instagram - format terbaik yang tersedia
+        ydl_opts.update({
+            'format': 'best[ext=mp4]/best',
+            'merge_output_format': 'mp4'
+        })
+    else:
+        return await ctx.send("🚫 Mode tidak dikenal. Gunakan: `yt`, `ytmp3`, `fb`, atau `ig`.")
+
+    try:
+        loop = asyncio.get_event_loop()
+        ydl = youtube_dl.YoutubeDL(ydl_opts)
+        info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
+
+        # Untuk Facebook dan Instagram, langsung download tanpa pengecekan format khusus
+        if mode in ['fb', 'ig']:
+            # Download langsung
+            ydl = youtube_dl.YoutubeDL(ydl_opts)
+            info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
+            filename = ydl.prepare_filename(info)
+            
+        else:
+            # Untuk YouTube, lakukan pengecekan format
+            selected_format = None
+            for f in info.get('formats', []):
+                # Skip format tanpa audio
+                if not f.get('acodec') or f['acodec'] == 'none':
+                    continue
+                
+                # Handle None values safely
+                size = f.get('filesize') or f.get('filesize_approx') or 0
+                height = f.get('height') or 0
+                
+                # Pastikan semua nilai adalah angka sebelum membandingkan
+                if (isinstance(size, (int, float)) and 
+                    isinstance(height, (int, float)) and
+                    0 < size <= DOWNLOAD_LIMIT_BYTES and 
+                    240 <= height <= 480):
+                    selected_format = f
+                    break
+
+            if not selected_format:
+                # Jika tidak ada format yang memenuhi kriteria, coba format dengan ukuran terkecil yang memiliki audio
+                valid_formats = []
+                for f in info.get('formats', []):
+                    if f.get('acodec') and f['acodec'] != 'none':
+                        size = f.get('filesize') or f.get('filesize_approx') or 0
+                        if isinstance(size, (int, float)) and size > 0:
+                            valid_formats.append((f, size))
+                
+                if valid_formats:
+                    # Pilih format dengan ukuran terkecil
+                    valid_formats.sort(key=lambda x: x[1])
+                    selected_format = valid_formats[0][0]
+                    print(f"🎬 Fallback format: {selected_format.get('format_id')}, size: {selected_format.get('filesize', 0)/1024/1024:.2f} MB")
+                else:
+                    await ctx.send("⚠️ Tidak ada format dengan audio yang sesuai. Mengunduh versi MP3 saja...")
+                    return await download_media(ctx, url, 'ytmp3')
+
+            format_id = selected_format["format_id"]
+            ydl_opts["format"] = format_id
+            print(f"🎬 Format terpilih: {format_id}, resolusi: {selected_format.get('height', 'N/A')}p, size: {selected_format.get('filesize', 0)/1024/1024:.2f} MB")
+
+            # Unduh video
+            ydl = youtube_dl.YoutubeDL(ydl_opts)
+            info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
+            filename = ydl.prepare_filename(info)
+
+        if not os.path.exists(filename):
+            return await ctx.send("❌ File hasil unduhan tidak ditemukan.")
+
+        # Kirim hasilnya
+        file = discord.File(filename, filename=os.path.basename(filename))
+        title = info.get("title", "Unknown Title")
+        webpage_url = info.get("webpage_url", url)
+        embed = discord.Embed(
+            title="✅ Video berhasil diunduh!",
+            description=f"**[{title}]({webpage_url})**",
+            color=0x00ff00
+        )
+        if info.get("thumbnail"):
+            embed.set_thumbnail(url=info["thumbnail"])
+        await ctx.send(embed=embed, file=file)
+
+    except Exception as e:
+        await ctx.send(f"❌ Terjadi error: `{e}`")
+
+    finally:
+        # Bersihkan file
+        try:
+            if 'filename' in locals() and os.path.exists(filename):
+                os.remove(filename)
+        except:
+            pass
+
+# ============================
+# WAIFU SYSTEM FUNCTIONS
+# ============================
+
+CLAIM_FILE = "claims.json"
+WAIFU_FOLDER = "images/waifu"
+
+# Pastikan folder dan file data ada
+os.makedirs(WAIFU_FOLDER, exist_ok=True)
+if not os.path.exists(CLAIM_FILE):
+    with open(CLAIM_FILE, "w") as f:
+        json.dump({}, f, indent=4)
+
+async def handle_waifu_claim(ctx):
+    waifu_folder = "./images/waifu"
+    claim_file = "claimed_waifus.json"
+
+    if not os.path.exists(waifu_folder):
+        await ctx.send("📁 Folder waifu tidak ditemukan!")
+        return
+
+    if not os.path.exists(claim_file):
+        with open(claim_file, "w") as f:
+            json.dump({}, f)
+
+    # Load data lama supaya tidak hilang
+    try:
+        with open(claim_file, "r") as f:
+            content = f.read().strip()
+            data = json.loads(content) if content else {}
+    except json.JSONDecodeError:
+        data = {}
+
+    user_id = str(ctx.author.id)
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # Cek claim hari ini
+    if user_id in data and data[user_id].get("date") == today:
+        waifu_name = data[user_id]["waifu"]
+        await ctx.send(f"💤 Kamu sudah claim hari ini, bebebmu tetap **{waifu_name}**~ 💕")
+        return
+
+    waifus = [f for f in os.listdir(waifu_folder) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+    if not waifus:
+        await ctx.send("⚠️ Tidak ada gambar waifu di folder.")
+        return
+
+    chosen = random.choice(waifus)
+    waifu_name = os.path.splitext(chosen)[0].replace("_", " ").title()
+
+    # Simpan tanpa hapus data lain
+    old_data = data.get(user_id, {})
+    old_count = old_data.get("count", 0)
+
+    data[user_id] = {
+        "date": today,
+        "waifu": waifu_name,
+        "count": old_count + 1
+    }
+
+    with open(claim_file, "w") as f:
+        json.dump(data, f, indent=4)
+
+    await ctx.send(f"💘 Hari ini bebebmu adalah **{waifu_name}**! 💞")
+
+    try:
+        await ctx.send(file=File(os.path.join(waifu_folder, chosen)))
+    except discord.HTTPException:
+        await ctx.send(f"⚠️ Gambar **{waifu_name}** terlalu besar untuk dikirim.")
+
+async def get_top_karbit(ctx):
+    claim_file = "claimed_waifus.json"
+
+    if not os.path.exists(claim_file):
+        await ctx.send("📂 Belum ada data claim.")
+        return
+
+    # Load data
+    try:
+        with open(claim_file, "r") as f:
+            content = f.read().strip()
+            data = json.loads(content) if content else {}
+    except json.JSONDecodeError:
+        data = {}
+
+    if not data:
+        await ctx.send("📭 Belum ada yang claim waifu.")
+        return
+
+    # Hitung leaderboard berdasarkan count
+    leaderboard = []
+    for user_id, info in data.items():
+        count = info.get("count", 0)
+        leaderboard.append((user_id, count))
+
+    leaderboard.sort(key=lambda x: x[1], reverse=True)
+
+    desc = ""
+    for i, (user_id, count) in enumerate(leaderboard[:10], start=1):
+        user = await ctx.bot.fetch_user(int(user_id))
+        desc += f"**{i}.** {user.name} — ❤️ {count}x claim\n"
+
+    embed = discord.Embed(
+        title="🏆 Top Karbit Leaderboard",
+        description=desc or "Belum ada yang claim 😴",
+        color=discord.Color.pink()
+    )
+
+    await ctx.send(embed=embed)
+
+# ============================
+# BOT EVENTS
+# ============================
+
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user} (ID: {bot.user.id})')
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="n.help"))
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    # Auto-disconnect if alone in voice channel
+    if member == bot.user and not after.channel:
+        player.clear()
+        player.current_song = None
+    
+    if member != bot.user and before.channel and not after.channel:
+        voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
+        if voice_client and voice_client.channel == before.channel:
+            if len(voice_client.channel.members) == 1:  # Only bot remains
+                await voice_client.disconnect()
+                player.clear()
+                player.current_song = None
+
+@bot.event
+async def on_message(message):
+    # Jangan respon pesan dari bot sendiri
+    if message.author.bot:
+        return
+
+    content = message.content.lower()
+
+    # Daftar kata kunci dan balasannya
+    replies = {
+        "jawa": "🗿 jawa lagi, jawa lagi...",
+        "my kisah": "💔 karbitnyooo~",
+        "bukankah ini": "Bukan~",
+        "samsul arif kejar dia": "habis bensin",
+        "nkj anjeng": (
+            "you're done lil bro\n\n"
+            "IP. 92.28.211.23\n"
+            "N: 43.7462\n"
+            "W: 12.4893 SS Number: 6979191519182043\n"
+            "IPv6: fe80:5dcd.:ef69:fb22::d9 \n"
+            "UPP: Enabled DMZ: 10.112.42\n"
+            "MAC: 5A:78:3:7E:00\n"
+            "DNS: 8.8.8.8\n"
+            "ALT DNS: 1.1.1.8.1\n"
+            "DNS SUFFIX: Dink WAN: 100.236\n"
+            "GATEWAY: 192.168\n"
+            "UDP OPEN PORT: 8080.80"
+        ),
+        "dika": "dika anjeng",
+        "help me reika": "In case of an investigation by any federal entity or similar, I do not have any involvement with this group or with the people in it, I do not know how I am here, probably added by a third party, I do not support any actions by members of this group.",
+        "lala": "Bete njing ada lala",
+        "bedwar": "bising bodo aku nak tido",
+        "my bebeb": f"ada apa nih beb {message.author.mention}~ 💕",
+        "aku lapar": "🍜 makan sana, nanti masuk angin~",
+        "reika": "Iya? dipanggil-panggil aja 😳"
+    }
+
+    # Cek apakah ada kata kunci di pesan
+    for keyword, reply in replies.items():
+        if keyword in content:
+            await message.channel.send(reply)
+            break  # Supaya gak spam kalau ada banyak keyword di 1 pesan
+
+    # Jangan lupa proses command juga
+    await bot.process_commands(message)
+
+# ============================
+# MUSIC COMMANDS
+# ============================
 
 @bot.command(aliases=['p'])
 async def play(ctx, *, query):
@@ -261,20 +621,6 @@ async def play(ctx, *, query):
 
         except Exception as e:
             await ctx.send(f"❌ Unexpected error: {str(e)}")
-
-async def play_next(ctx):
-    """Play the next song in queue"""
-    if player.queue:
-        next_song = player.queue.popleft()
-        await play_song(ctx.voice_client, next_song)
-        embed = discord.Embed(
-            description=f"🎶 Now playing: [{next_song.title}]({next_song.url})",
-            color=0x00ff00
-        )
-        embed.set_footer(text=f"Requested by {next_song.requester.display_name}")
-        if next_song.thumbnail:
-            embed.set_thumbnail(url=next_song.thumbnail)
-        await ctx.send(embed=embed)
 
 @bot.command(aliases=['q'])
 async def queue(ctx, page: int = 1):
@@ -441,30 +787,166 @@ async def move(ctx, from_pos: int, to_pos: int):
     await ctx.send(embed=embed)
 
 @bot.command(aliases=['h', 'commands'])
-async def help(ctx):
-    """Show all commands"""
-    prefix = ctx.prefix  # This will be 'n.' in our case
-    embed = discord.Embed(title=f"{prefix}🎵 Music Bot Commands", color=0x00ff00)
+async def help(ctx, category: str = None):
+    """Show all commands organized by categories"""
     
-    commands = [
-        (f"{prefix}play [query/URL]", "Play a song or add to queue"),
-        (f"{prefix}queue [page]", "Show current queue (10 songs per page)"),
-        (f"{prefix}skip", "Skip current song"),
-        (f"{prefix}loop", "Toggle current song loop"),
-        (f"{prefix}loopqueue", "Toggle queue looping"),
-        (f"{prefix}remove [position]", "Remove song from queue"),
-        (f"{prefix}clear", "Clear the queue"),
-        (f"{prefix}volume [0-100]", "Set playback volume"),
-        (f"{prefix}shuffle", "Shuffle the queue"),
-        (f"{prefix}move [from] [to]", "Move song in queue"),
-        (f"{prefix}stop", "Stop playback and disconnect")
-    ]
+    # Define command categories
+    categories = {
+        "music": {
+            "name": "🎵 Music Commands",
+            "description": "Commands for music playback and queue management",
+            "emoji": "🎵"
+        },
+        "download": {
+            "name": "📥 Download Commands", 
+            "description": "Commands for downloading media from various platforms",
+            "emoji": "📥"
+        },
+        "waifu": {
+            "name": "💖 Waifu System",
+            "description": "Waifu claiming and management commands",
+            "emoji": "💖"
+        },
+        "utility": {
+            "name": "🔧 Utility Commands",
+            "description": "Various utility and fun commands",
+            "emoji": "🔧"
+        }
+    }
+
+    # Auto-categorize commands
+    command_categories = {}
     
-    for name, value in commands:
-        embed.add_field(name=name, value=value, inline=False)
-    
-    embed.set_footer(text=f"Use {prefix} before each command")
+    for cmd in bot.commands:
+        # Skip the help command itself
+        if cmd.name == 'help':
+            continue
+            
+        # Categorize based on command name and function
+        if any(keyword in cmd.name for keyword in ['play', 'skip', 'queue', 'loop', 'volume', 'shuffle', 'move', 'stop', 'clear', 'remove']):
+            category_name = "music"
+        elif any(keyword in cmd.name for keyword in ['yt', 'fb', 'ig', 'twitter', 'download', 'thumbnail', 'togif']):
+            category_name = "download"
+        elif any(keyword in cmd.name for keyword in ['claim', 'waifu', 'karbit', 'resetclaim']):
+            category_name = "waifu"
+        else:
+            category_name = "utility"
+            
+        if category_name not in command_categories:
+            command_categories[category_name] = []
+        
+        # Get command info
+        aliases = f" ({', '.join(cmd.aliases)})" if cmd.aliases else ""
+        command_info = {
+            "name": f"{ctx.prefix}{cmd.name}{aliases}",
+            "description": cmd.help or "No description available",
+            "command": cmd
+        }
+        command_categories[category_name].append(command_info)
+
+    # If specific category is requested
+    if category and category.lower() in categories:
+        cat_key = category.lower()
+        cat_info = categories[cat_key]
+        
+        embed = discord.Embed(
+            title=f"{cat_info['emoji']} {cat_info['name']}",
+            description=cat_info['description'],
+            color=0x00ff00
+        )
+        
+        if cat_key in command_categories:
+            for cmd_info in sorted(command_categories[cat_key], key=lambda x: x['name']):
+                embed.add_field(
+                    name=cmd_info['name'],
+                    value=cmd_info['description'],
+                    inline=False
+                )
+        else:
+            embed.add_field(name="No commands", value="No commands in this category.", inline=False)
+            
+        embed.set_footer(text=f"Use {ctx.prefix}help for all categories")
+        await ctx.send(embed=embed)
+        return
+
+    # Show main help menu with all categories
+    embed = discord.Embed(
+        title=f"{ctx.prefix}🤖 Bot Commands Overview",
+        description="Use the commands below to interact with the bot. Commands are organized by category for easy navigation.",
+        color=0x00ff00
+    )
+
+    # Add category overview
+    for cat_key, cat_info in categories.items():
+        command_count = len(command_categories.get(cat_key, []))
+        example_commands = ", ".join([cmd['command'].name for cmd in command_categories.get(cat_key, [])[:3]])
+        if command_count > 3:
+            example_commands += f"... (+{command_count - 3} more)"
+            
+        embed.add_field(
+            name=f"{cat_info['emoji']} {cat_info['name']} ({command_count} commands)",
+            value=f"{cat_info['description']}\n`{ctx.prefix}help {cat_key}` • Examples: {example_commands}",
+            inline=False
+        )
+
+    # Add usage tips
+    embed.add_field(
+        name="💡 Usage Tips",
+        value=f"• Use `{ctx.prefix}help <category>` to see commands in a specific category\n• Use `{ctx.prefix}help <command>` for detailed command info\n• Most music commands have shorter aliases for convenience",
+        inline=False
+    )
+
     await ctx.send(embed=embed)
+
+@help.error
+async def help_error(ctx, error):
+    """Error handler for help command"""
+    if isinstance(error, commands.BadArgument):
+        await ctx.send("❌ Category not found. Use `help` to see available categories.")
+
+# Auto-generate command descriptions for commands without help text
+def setup_command_help():
+    """Automatically add help text to commands that don't have it"""
+    command_descriptions = {
+        # Music commands
+        'play': 'Play a song or add to queue - supports YouTube, playlists, and search queries',
+        'skip': 'Skip the currently playing song',
+        'queue': 'Show the current music queue with pagination',
+        'loop': 'Toggle loop for the current song',
+        'loopqueue': 'Toggle queue looping',
+        'remove': 'Remove a song from the queue by position',
+        'clear': 'Clear all songs from the queue',
+        'volume': 'Set the playback volume (0-100) or show current volume',
+        'shuffle': 'Shuffle the current queue',
+        'move': 'Move a song from one position to another in the queue',
+        'stop': 'Stop playback and disconnect from voice channel',
+        
+        # Download commands
+        'yt': 'Download video from YouTube (max 480p with audio)',
+        'ytmp3': 'Download audio (MP3) from YouTube',
+        'fb': 'Download video from Facebook',
+        'ig': 'Download video from Instagram',
+        'twitter': 'Download video from Twitter/X with auto-upload for large files',
+        'ytthumbnail': 'Get YouTube video thumbnail from URL',
+        'togif': 'Convert image/video to GIF (reply to a file or attach one)',
+        
+        # Waifu commands
+        'claim': 'Claim your daily waifu - get a random waifu image each day',
+        'resetclaim': '[ADMIN] Reset daily claim for a user',
+        'topkarbit': 'Show leaderboard of top waifu claimers',
+    }
+    
+    for cmd_name, description in command_descriptions.items():
+        cmd = bot.get_command(cmd_name)
+        if cmd and not cmd.help:
+            cmd.help = description
+
+# Run the setup when bot starts
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user} (ID: {bot.user.id})')
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="n.help"))
+    setup_command_help()  # Setup auto-help descriptions
 
 @bot.command()
 async def stop(ctx):
@@ -477,19 +959,260 @@ async def stop(ctx):
     await ctx.voice_client.disconnect()
     await ctx.message.add_reaction("🛑")
 
-@bot.event
-async def on_voice_state_update(member, before, after):
-    # Auto-disconnect if alone in voice channel
-    if member == bot.user and not after.channel:
-        player.clear()
-        player.current_song = None
-    
-    if member != bot.user and before.channel and not after.channel:
-        voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
-        if voice_client and voice_client.channel == before.channel:
-            if len(voice_client.channel.members) == 1:  # Only bot remains
-                await voice_client.disconnect()
-                player.clear()
-                player.current_song = None
+# ============================
+# MEDIA DOWNLOAD COMMANDS
+# ============================
+
+@bot.command()
+async def yt(ctx, url: str):
+    """Download video dari YouTube (maks 1080p)"""
+    await download_media(ctx, url, 'yt')
+
+@bot.command()
+async def ytmp3(ctx, url: str):
+    """Download audio (MP3) dari YouTube"""
+    await download_media(ctx, url, 'ytmp3')
+
+@bot.command()
+async def fb(ctx, url: str):
+    """Download video dari Facebook"""
+    await download_media(ctx, url, 'fb')
+
+@bot.command()
+async def ig(ctx, url: str):
+    """Download video dari Instagram"""
+    await download_media(ctx, url, 'ig')
+
+@bot.command(name="ytthumbnail")
+async def ytthumbnail(ctx, url: str = None):
+    if url is None:
+        await ctx.send("📺 Gunakan command seperti ini:\n`n.ytthumbnail <link_youtube>`")
+        return
+
+    # Regex ambil video ID dari URL YouTube
+    pattern = r"(?:v=|youtu\.be/|embed/)([a-zA-Z0-9_-]{11})"
+    match = re.search(pattern, url)
+
+    if not match:
+        await ctx.send("⚠️ Tidak bisa menemukan ID video YouTube dari link itu.")
+        return
+
+    video_id = match.group(1)
+    resolutions = [
+        f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",  # resolusi tertinggi
+        f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",      # fallback
+        f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg"       # fallback lagi
+    ]
+
+    # Coba ambil thumbnail yang tersedia
+    thumbnail_url = None
+    async with aiohttp.ClientSession() as session:
+        for res_url in resolutions:
+            async with session.get(res_url) as resp:
+                if resp.status == 200:
+                    thumbnail_url = res_url
+                    break
+
+    if thumbnail_url is None:
+        await ctx.send("😔 Tidak bisa menemukan thumbnail untuk video tersebut.")
+        return
+
+    # Buat embed cantik
+    embed = discord.Embed(
+        title="🎬 YouTube Thumbnail",
+        description=f"Thumbnail dari: {url}",
+        color=discord.Color.red()
+    )
+    embed.set_image(url=thumbnail_url)
+    embed.set_footer(text="Requested by " + ctx.author.name)
+
+    await ctx.send(embed=embed)
+    await ctx.send(f"🖼️ **Link download langsung:** {thumbnail_url}")
+
+@bot.command(name="twitter")
+async def download_twitter(ctx, url: str):
+    """
+    Download video dari Twitter (X) menggunakan yt-dlp.
+    Jika file terlalu besar (>25MB), akan diupload ke GoFile.io.
+    """
+    await ctx.send("🐦 Sedang memproses video Twitter...")
+
+    temp_filename = os.path.join(DOWNLOADS_PATH, "twitter_video.mp4")
+
+    # Hapus file lama kalau ada
+    if os.path.exists(temp_filename):
+        os.remove(temp_filename)
+
+    # Setup opsi yt-dlp
+    ydl_opts = {
+        "outtmpl": temp_filename,
+        "format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "merge_output_format": "mp4",
+    }
+
+    try:
+        # Download video
+        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        # Cek ukuran file
+        file_size = os.path.getsize(temp_filename)
+        limit_bytes = 25 * 1024 * 1024  # 25 MB
+
+        if file_size <= limit_bytes:
+            await ctx.send("✅ Video berhasil diunduh!", file=File(temp_filename))
+        else:
+            await ctx.send("⚠️ File terlalu besar, sedang diupload ke GoFile.io...")
+
+            # Dapatkan server upload GoFile
+            server_info = requests.get("https://api.gofile.io/getServer").json()
+            if server_info["status"] != "ok":
+                await ctx.send("❌ Gagal ambil server GoFile.io.")
+                return
+
+            server = server_info["data"]["server"]
+
+            # Upload file ke GoFile
+            with open(temp_filename, "rb") as f:
+                response = requests.post(
+                    f"https://{server}.gofile.io/uploadFile",
+                    files={"file": f}
+                ).json()
+
+            if response["status"] == "ok":
+                download_link = response["data"]["downloadPage"]
+                await ctx.send(f"📦 Video terlalu besar, tapi sudah diupload!\n🔗 {download_link}")
+            else:
+                await ctx.send("❌ Gagal mengupload video ke GoFile.io.")
+
+    except Exception as e:
+        await ctx.send(f"❌ Gagal mendownload video Twitter: `{e}`")
+
+    finally:
+        # Bersihkan file sementara
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
+
+@bot.command()
+async def togif(ctx):
+    """
+    Convert image/video menjadi GIF (<=10MB)
+    Bisa reply pesan dengan file, atau kirim file langsung.
+    """
+    await ctx.send("🎞️ Sedang mengubah ke GIF...")
+
+    DOWNLOAD_LIMIT_BYTES = 10 * 1024 * 1024
+
+    # ambil attachment dari reply atau message
+    attachment = None
+    if ctx.message.attachments:
+        attachment = ctx.message.attachments[0]
+    elif ctx.message.reference:
+        ref = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+        if ref.attachments:
+            attachment = ref.attachments[0]
+
+    if not attachment:
+        return await ctx.send("⚠️ Tidak ada file yang ditemukan. Kirim atau reply file gambar/video!")
+
+    filename = os.path.join(DOWNLOADS_PATH, attachment.filename)
+    await attachment.save(filename)
+
+    output_path = os.path.splitext(filename)[0] + ".gif"
+
+    try:
+        # Cek tipe file
+        if attachment.content_type.startswith("image/"):
+            # Gambar → GIF
+            with Image.open(filename) as img:
+                img.save(output_path, format="GIF")
+        elif attachment.content_type.startswith("video/"):
+            # Video → GIF (gunakan moviepy)
+            clip = mp.VideoFileClip(filename)
+            clip = clip.subclip(0, min(clip.duration, 10))  # Maks 10 detik agar kecil
+            clip = clip.resize(width=480)  # Biar efisien ukuran
+            clip.write_gif(output_path, program="ffmpeg", logger=None)
+        else:
+            return await ctx.send("❌ Format file tidak didukung. Hanya gambar atau video!")
+
+        # Cek ukuran hasil
+        if os.path.getsize(output_path) > DOWNLOAD_LIMIT_BYTES:
+            return await ctx.send("⚠️ GIF hasilnya terlalu besar (>10MB). Coba file lebih pendek atau resolusi lebih kecil!")
+
+        # Kirim hasil
+        file = discord.File(output_path, filename=os.path.basename(output_path))
+        await ctx.send("✅ Berhasil dikonversi ke GIF!", file=file)
+
+    except Exception as e:
+        await ctx.send(f"❌ Terjadi error saat konversi: `{e}`")
+
+    finally:
+        # Bersihkan file
+        try:
+            for f in [filename, output_path]:
+                if os.path.exists(f):
+                    os.remove(f)
+        except:
+            pass
+
+# ============================
+# WAIFU SYSTEM COMMANDS
+# ============================
+
+@bot.command(name="claim")
+async def claim_waifu(ctx):
+    await handle_waifu_claim(ctx)
+
+@bot.command(name="resetclaim")
+async def reset_claim_user(ctx, member: discord.Member = None):
+    ADMIN_ID = 869897744972668948
+    claim_file = "claimed_waifus.json"
+
+    if ctx.author.id != ADMIN_ID:
+        await ctx.send("🚫 Kamu tidak punya izin untuk menggunakan command ini.")
+        return
+
+    if member is None:
+        await ctx.send("⚠️ Tag user yang ingin kamu reset, contoh: `n.resetclaim @user`")
+        return
+
+    # Cek file data claim
+    if not os.path.exists(claim_file):
+        await ctx.send("📁 File claim belum ada.")
+        return
+
+    # Load data claim
+    try:
+        with open(claim_file, "r") as f:
+            content = f.read().strip()
+            data = json.loads(content) if content else {}
+    except json.JSONDecodeError:
+        data = {}
+
+    user_id = str(member.id)
+    if user_id not in data:
+        await ctx.send(f"🙃 {member.mention} belum pernah claim waifu.")
+        return
+
+    # Hapus tanggal claim agar bisa claim lagi hari ini
+    waifu_name = data[user_id]["waifu"]
+    data[user_id]["date"] = ""  # Reset hanya tanggal, bukan seluruh data
+    data[user_id]["waifu"] = waifu_name
+    data[user_id]["count"] = data[user_id].get("count", 0)  # Pastikan field count tetap ada
+
+    with open(claim_file, "w") as f:
+        json.dump(data, f, indent=4)
+
+    await ctx.send(f"🔁 Claim harian {member.mention} telah direset. Sekarang dia bisa claim lagi hari ini 💞")
+
+@bot.command(name="topkarbit")
+async def top_karbit(ctx):
+    await get_top_karbit(ctx)
+
+# ============================
+# BOT START
+# ============================
 
 bot.run(BOT_TOKEN)
