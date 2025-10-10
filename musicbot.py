@@ -5,7 +5,7 @@ import re
 import aiohttp
 from discord.ext import commands
 import yt_dlp as youtube_dl
-from datetime import datetime,  timedelta, UTC
+from datetime import datetime,  timedelta, timezone
 from discord import File
 import asyncio
 from collections import deque
@@ -302,7 +302,7 @@ async def download_media(ctx, url, mode):
 # WAIFU SYSTEM FUNCTIONS
 # ============================
 
-CLAIM_FILE = "claims.json"
+# CLAIM_FILE = "claims.json"
 WAIFU_FOLDER = "images/waifu"
 
 # Pastikan folder dan file data ada
@@ -1272,7 +1272,7 @@ async def bot_ban(ctx, member: discord.Member, *, reason: str = "Tidak disebutka
         "type": "ban",
         "by": str(ctx.author.id),
         "reason": reason,
-        "set_at": datetime.now(datetime.UTC).isoformat()
+        "set_at": datetime.now(timezone.utc).isoformat()
     }
     save_bans(data)
     await ctx.send(f"🔒 {member.mention} sekarang diblokir dari memakai bot. Alasan: {reason}")
