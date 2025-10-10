@@ -5,11 +5,12 @@ import re
 import aiohttp
 from discord.ext import commands
 import yt_dlp as youtube_dl
-from datetime import datetime
+from datetime import datetime,  timedelta, UTC
 from discord import File
 import asyncio
 from collections import deque
 from config import BOT_TOKEN, PREFIX
+import time
 import moviepy as mp
 from PIL import Image
 
@@ -187,28 +188,20 @@ async def process_playlist(url, requester):
 # ============================
 # MEDIA DOWNLOAD FUNCTIONS
 # ============================
-
 async def download_media(ctx, url, mode):
     await ctx.send("⏳ Sedang memproses permintaanmu...")
 
-    DOWNLOAD_LIMIT_MB = 10
-    DOWNLOAD_LIMIT_BYTES = DOWNLOAD_LIMIT_MB * 1024 * 1024
-
     ydl_opts = {
-        'outtmpl': os.path.join(DOWNLOADS_PATH, '%(title)s.%(ext)s'),
+        'outtmpl': os.path.join(DOWNLOADS_PATH, 'temp_download.%(ext)s'),
         'quiet': True,
         'noplaylist': True,
         'no_warnings': True,
     }
 
-    # Tentukan mode
+    # Format untuk setiap mode - support YouTube Music
     if mode == 'yt':
-        # Fokus ke 360p–480p tapi tetap ada audio
         ydl_opts.update({
-            'format': (
-                'bestvideo[height<=480][height>=360][vcodec*=avc1]+bestaudio[ext=m4a]/'
-                'best[height<=480][ext=mp4]'
-            ),
+            'format': 'best[height<=480]/best[ext=mp4]',
             'merge_output_format': 'mp4'
         })
     elif mode == 'ytmp3':
@@ -217,19 +210,17 @@ async def download_media(ctx, url, mode):
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '128',
+                'preferredquality': '192',  # Increase quality for music
             }]
         })
     elif mode == 'fb':
-        # Facebook - format terbaik yang tersedia
         ydl_opts.update({
             'format': 'best[ext=mp4]/best',
             'merge_output_format': 'mp4'
         })
     elif mode == 'ig':
-        # Instagram - format terbaik yang tersedia
         ydl_opts.update({
-            'format': 'best[ext=mp4]/best',
+            'format': 'best[ext=mp4]/best', 
             'merge_output_format': 'mp4'
         })
     else:
@@ -238,76 +229,63 @@ async def download_media(ctx, url, mode):
     try:
         loop = asyncio.get_event_loop()
         ydl = youtube_dl.YoutubeDL(ydl_opts)
+        
+        # Extract info untuk mendapatkan metadata
         info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
-
-        # Untuk Facebook dan Instagram, langsung download tanpa pengecekan format khusus
-        if mode in ['fb', 'ig']:
-            # Download langsung
-            ydl = youtube_dl.YoutubeDL(ydl_opts)
-            info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
-            filename = ydl.prepare_filename(info)
-            
+        
+        # Cek jika ini dari YouTube Music
+        is_music = 'music.youtube.com' in url.lower() or info.get('extractor') == 'youtube:tab'
+        
+        # Download file
+        await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
+        
+        # Tentukan nama file berdasarkan mode
+        if mode == 'ytmp3':
+            filename = os.path.join(DOWNLOADS_PATH, 'temp_download.mp3')
+            file_extension = 'mp3'
         else:
-            # Untuk YouTube, lakukan pengecekan format
-            selected_format = None
-            for f in info.get('formats', []):
-                # Skip format tanpa audio
-                if not f.get('acodec') or f['acodec'] == 'none':
-                    continue
-                
-                # Handle None values safely
-                size = f.get('filesize') or f.get('filesize_approx') or 0
-                height = f.get('height') or 0
-                
-                # Pastikan semua nilai adalah angka sebelum membandingkan
-                if (isinstance(size, (int, float)) and 
-                    isinstance(height, (int, float)) and
-                    0 < size <= DOWNLOAD_LIMIT_BYTES and 
-                    240 <= height <= 480):
-                    selected_format = f
-                    break
-
-            if not selected_format:
-                # Jika tidak ada format yang memenuhi kriteria, coba format dengan ukuran terkecil yang memiliki audio
-                valid_formats = []
-                for f in info.get('formats', []):
-                    if f.get('acodec') and f['acodec'] != 'none':
-                        size = f.get('filesize') or f.get('filesize_approx') or 0
-                        if isinstance(size, (int, float)) and size > 0:
-                            valid_formats.append((f, size))
-                
-                if valid_formats:
-                    # Pilih format dengan ukuran terkecil
-                    valid_formats.sort(key=lambda x: x[1])
-                    selected_format = valid_formats[0][0]
-                    print(f"🎬 Fallback format: {selected_format.get('format_id')}, size: {selected_format.get('filesize', 0)/1024/1024:.2f} MB")
-                else:
-                    await ctx.send("⚠️ Tidak ada format dengan audio yang sesuai. Mengunduh versi MP3 saja...")
-                    return await download_media(ctx, url, 'ytmp3')
-
-            format_id = selected_format["format_id"]
-            ydl_opts["format"] = format_id
-            print(f"🎬 Format terpilih: {format_id}, resolusi: {selected_format.get('height', 'N/A')}p, size: {selected_format.get('filesize', 0)/1024/1024:.2f} MB")
-
-            # Unduh video
-            ydl = youtube_dl.YoutubeDL(ydl_opts)
-            info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
-            filename = ydl.prepare_filename(info)
+            filename = os.path.join(DOWNLOADS_PATH, 'temp_download.mp4')
+            file_extension = 'mp4'
 
         if not os.path.exists(filename):
             return await ctx.send("❌ File hasil unduhan tidak ditemukan.")
 
+        # Siapkan metadata untuk embed
+        title = info.get('title', 'Unknown Title')
+        webpage_url = info.get('webpage_url', url)
+        thumbnail = info.get('thumbnail')
+        
+        # Untuk YouTube Music, tambahkan info artist jika ada
+        description = f"**[{title}]({webpage_url})**"
+        if is_music and info.get('artist'):
+            description = f"**🎵 {title}**\n👤 **Artist:** {info.get('artist')}\n🔗 {webpage_url}"
+        
         # Kirim hasilnya
-        file = discord.File(filename, filename=os.path.basename(filename))
-        title = info.get("title", "Unknown Title")
-        webpage_url = info.get("webpage_url", url)
+        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        file = discord.File(filename, filename=f"{safe_title[:50]}.{file_extension}")
+        
+        embed_title = "✅ Audio berhasil diunduh!" if mode == 'ytmp3' else "✅ Video berhasil diunduh!"
+        if is_music:
+            embed_title = "🎵 Musik berhasil diunduh!" if mode == 'ytmp3' else "🎵 Video musik berhasil diunduh!"
+        
         embed = discord.Embed(
-            title="✅ Video berhasil diunduh!",
-            description=f"**[{title}]({webpage_url})**",
+            title=embed_title,
+            description=description,
             color=0x00ff00
         )
-        if info.get("thumbnail"):
-            embed.set_thumbnail(url=info["thumbnail"])
+        
+        if thumbnail:
+            embed.set_thumbnail(url=thumbnail)
+            
+        # Tambahkan info durasi untuk musik
+        if is_music and info.get('duration'):
+            duration = info.get('duration')
+            minutes, seconds = divmod(duration, 60)
+            embed.add_field(name="⏱️ Durasi", value=f"{minutes}:{seconds:02d}", inline=True)
+            
+        if is_music and info.get('album'):
+            embed.add_field(name="💿 Album", value=info.get('album'), inline=True)
+
         await ctx.send(embed=embed, file=file)
 
     except Exception as e:
@@ -320,7 +298,6 @@ async def download_media(ctx, url, mode):
                 os.remove(filename)
         except:
             pass
-
 # ============================
 # WAIFU SYSTEM FUNCTIONS
 # ============================
@@ -454,52 +431,6 @@ async def on_voice_state_update(member, before, after):
                 await voice_client.disconnect()
                 player.clear()
                 player.current_song = None
-
-@bot.event
-async def on_message(message):
-    # Jangan respon pesan dari bot sendiri
-    if message.author.bot:
-        return
-
-    content = message.content.lower()
-
-    # Daftar kata kunci dan balasannya
-    replies = {
-        "jawa": "🗿 jawa lagi, jawa lagi...",
-        "my kisah": "💔 karbitnyooo~",
-        "bukankah ini": "Bukan~",
-        "samsul arif kejar dia": "habis bensin",
-        "nkj anjeng": (
-            "you're done lil bro\n\n"
-            "IP. 92.28.211.23\n"
-            "N: 43.7462\n"
-            "W: 12.4893 SS Number: 6979191519182043\n"
-            "IPv6: fe80:5dcd.:ef69:fb22::d9 \n"
-            "UPP: Enabled DMZ: 10.112.42\n"
-            "MAC: 5A:78:3:7E:00\n"
-            "DNS: 8.8.8.8\n"
-            "ALT DNS: 1.1.1.8.1\n"
-            "DNS SUFFIX: Dink WAN: 100.236\n"
-            "GATEWAY: 192.168\n"
-            "UDP OPEN PORT: 8080.80"
-        ),
-        "dika": "dika anjeng",
-        "help me reika": "In case of an investigation by any federal entity or similar, I do not have any involvement with this group or with the people in it, I do not know how I am here, probably added by a third party, I do not support any actions by members of this group.",
-        "lala": "Bete njing ada lala",
-        "bedwar": "bising bodo aku nak tido",
-        "my bebeb": f"ada apa nih beb {message.author.mention}~ 💕",
-        "aku lapar": "🍜 makan sana, nanti masuk angin~",
-        "reika": "Iya? dipanggil-panggil aja 😳"
-    }
-
-    # Cek apakah ada kata kunci di pesan
-    for keyword, reply in replies.items():
-        if keyword in content:
-            await message.channel.send(reply)
-            break  # Supaya gak spam kalau ada banyak keyword di 1 pesan
-
-    # Jangan lupa proses command juga
-    await bot.process_commands(message)
 
 # ============================
 # MUSIC COMMANDS
@@ -825,7 +756,7 @@ async def help(ctx, category: str = None):
         # Categorize based on command name and function
         if any(keyword in cmd.name for keyword in ['play', 'skip', 'queue', 'loop', 'volume', 'shuffle', 'move', 'stop', 'clear', 'remove']):
             category_name = "music"
-        elif any(keyword in cmd.name for keyword in ['yt', 'fb', 'ig', 'twitter', 'download', 'thumbnail', 'togif']):
+        elif any(keyword in cmd.name for keyword in ['ytmp3','yt', 'fb', 'ig', 'twitter', 'download', 'thumbnail', 'togif']):
             category_name = "download"
         elif any(keyword in cmd.name for keyword in ['claim', 'waifu', 'karbit', 'resetclaim']):
             category_name = "waifu"
@@ -1211,6 +1142,199 @@ async def reset_claim_user(ctx, member: discord.Member = None):
 async def top_karbit(ctx):
     await get_top_karbit(ctx)
 
+BOT_BANS_FILE = "bot_bans.json"
+
+# ---------- Helper load/save ----------
+def load_bans():
+    if not os.path.exists(BOT_BANS_FILE):
+        with open(BOT_BANS_FILE, "w") as f:
+            json.dump({}, f)
+        return {}
+    try:
+        with open(BOT_BANS_FILE, "r") as f:
+            content = f.read().strip()
+            return json.loads(content) if content else {}
+    except json.JSONDecodeError:
+        # jika rusak, reset ke {}
+        return {}
+
+def save_bans(data):
+    with open(BOT_BANS_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+def is_timeout_expired(entry):
+    """Entry contoh: {'type':'timeout','until':'2025-10-10T12:34:56'}"""
+    if not entry:
+        return True
+    if entry.get("type") != "timeout":
+        return False
+    until = entry.get("until")
+    if not until:
+        return True
+    try:
+        dt = datetime.fromisoformat(until)
+        return datetime.utcnow() >= dt
+    except Exception:
+        return True
+
+def cleanup_expired_timeouts():
+    data = load_bans()
+    changed = False
+    for uid, entry in list(data.items()):
+        if entry.get("type") == "timeout" and is_timeout_expired(entry):
+            # hapus entry yang timeout-nya sudah lewat
+            del data[uid]
+            changed = True
+    if changed:
+        save_bans(data)
+
+# ---------- Global check for commands ----------
+@bot.check
+async def global_not_banned_check(ctx):
+    """
+    Dipanggil sebelum command mana pun.
+    Return False akan mencegah perintah dieksekusi.
+    """
+    cleanup_expired_timeouts()
+    data = load_bans()
+    user_id = str(ctx.author.id)
+    entry = data.get(user_id)
+    if not entry:
+        return True
+
+    # Permanent ban
+    if entry.get("type") == "ban":
+        # beri respon singkat
+        await ctx.send(f"🚫 Maaf {ctx.author.mention}, kamu diblokir dari menggunakan bot ini. Alasan: {entry.get('reason','-')}")
+        return False
+
+    # Timeout (sementara)
+    if entry.get("type") == "timeout":
+        if is_timeout_expired(entry):
+            # seharusnya sudah di-cleanup tapi double-check
+            del data[user_id]
+            save_bans(data)
+            return True
+        else:
+            until = entry.get("until")
+            await ctx.send(f"⏳ Maaf {ctx.author.mention}, akses bot dibatasi sampai **{until} UTC**. Alasan: {entry.get('reason','-')}")
+            return False
+
+    return True
+
+# ---------- Block auto-reply (on_message) ----------
+# Pastikan auto-reply memeriksa bans juga.
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    cleanup_expired_timeouts()
+    data = load_bans()
+    if str(message.author.id) in data:
+        # Jika user dibanned/timeout, jangan balas keyword atau process command.
+        # Namun tetap proses commands supaya global check bisa memberi pesan spesifik.
+        await bot.process_commands(message)
+        return
+
+    content = message.content.lower()
+    
+    replies = {
+        "jawa": "🗿 jawa lagi, jawa lagi...",
+        "my kisah": "💔 karbitnyooo~",
+        "bukankah ini": "Bukan~",
+        "samsul": "habis bensin",
+        "nkj": "you're done lil bro\n\nIP. 92.28.211.23\nN: 43.7462\nW: 12.4893 SS Number: 6979191519182043\nIPv6: fe80:5dcd.:ef69:fb22::d9 \nUPP: Enabled DMZ: 10.112.42\nMAC: 5A:78:3:7E:00\nDNS: 8.8.8.8\nALT DNS: 1.1.1.8.1\nDNS SUFFIX: Dink WAN: 100.236\nGATEWAY: 192.168\nUDP OPEN PORT: 8080.80",
+        "dika": "dika anjeng",
+        "help me reika": "In case of an investigation by any federal entity or similar, I do not have any involvement with this group or with the people in it, I do not know how I am here, probably added by a third party, I do not support any actions by members of this group.",
+        "lala": "Bete njing ada lala",
+        "bedwar": "bising bodo aku nak tido",
+        "my bebeb": f"ada apa nih beb {message.author.mention}~ 💕",
+        "lapar": "🍜 makan sana, nanti masuk angin~",
+        "reika": "Iya? dipanggil-panggil aja 😳"
+    }
+    for k, v in replies.items():
+        if k in content:
+            await message.channel.send(v)
+            break
+
+    await bot.process_commands(message)
+
+
+# Ubah permission check sesuai preferensi: pakai has_permissions(manage_guild=True) atau has_role
+# Di sini aku gunakan has_permissions(administrator=True) — hanya admin server yang bisa menjalankan.
+@bot.command(name="botban")
+@commands.has_permissions(administrator=True)
+async def bot_ban(ctx, member: discord.Member, *, reason: str = "Tidak disebutkan"):
+    data = load_bans()
+    uid = str(member.id)
+    data[uid] = {
+        "type": "ban",
+        "by": str(ctx.author.id),
+        "reason": reason,
+        "set_at": datetime.now(datetime.UTC).isoformat()
+    }
+    save_bans(data)
+    await ctx.send(f"🔒 {member.mention} sekarang diblokir dari memakai bot. Alasan: {reason}")
+
+@bot.command(name="botunban")
+@commands.has_permissions(administrator=True)
+async def bot_unban(ctx, member: discord.User):
+    data = load_bans()
+    uid = str(member.id)
+    if uid not in data:
+        await ctx.send(f"ℹ️ {member.mention} tidak ada di daftar blokir.")
+        return
+    del data[uid]
+    save_bans(data)
+    await ctx.send(f"✅ {member.mention} berhasil dihapus dari daftar blokir bot.")
+
+@bot.command(name="bottimeout")
+@commands.has_permissions(administrator=True)
+async def bot_timeout(ctx, member: discord.Member, minutes: int, *, reason: str = "Tidak disebutkan"):
+    """
+    Contoh: n.bottimeout @user 60 spam
+    """
+    if minutes <= 0:
+        await ctx.send("🚫 Durasi harus lebih dari 0 menit.")
+        return
+
+    until_dt = datetime.utcnow() + timedelta(minutes=minutes)
+    data = load_bans()
+    uid = str(member.id)
+    data[uid] = {
+        "type": "timeout",
+        "by": str(ctx.author.id),
+        "reason": reason,
+        "set_at": datetime.utcnow().isoformat(),
+        "until": until_dt.isoformat()  # UTC
+    }
+    save_bans(data)
+    await ctx.send(f"⏳ {member.mention} dibatasi akses bot sampai **{until_dt.isoformat()} UTC**. Alasan: {reason}")
+
+@bot.command(name="botbanlist")
+@commands.has_permissions(administrator=True)
+async def bot_ban_list(ctx):
+    cleanup_expired_timeouts()
+    data = load_bans()
+    if not data:
+        await ctx.send("📭 Tidak ada user yang diblokir dari bot.")
+        return
+
+    lines = []
+    for uid, entry in data.items():
+        typ = entry.get("type", "unknown")
+        reason = entry.get("reason", "-")
+        by = entry.get("by", "-")
+        if typ == "timeout":
+            until = entry.get("until", "-")
+            lines.append(f"<@{uid}> — {typ} until {until} UTC — reason: {reason} — by <@{by}>")
+        else:
+            lines.append(f"<@{uid}> — {typ} — reason: {reason} — by <@{by}>")
+
+    # Kirim embed (atau pesan biasa jika terlalu panjang)
+    embed = discord.Embed(title="🔒 Bot Ban List", description="\n".join(lines[:20]))
+    await ctx.send(embed=embed)
 # ============================
 # BOT START
 # ============================
