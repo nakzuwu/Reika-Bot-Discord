@@ -302,7 +302,7 @@ async def download_media(ctx, url, mode):
 # WAIFU SYSTEM FUNCTIONS
 # ============================
 
-# CLAIM_FILE = "claims.json"
+CLAIM_FILE = "claims.json"
 WAIFU_FOLDER = "images/waifu"
 
 # Pastikan folder dan file data ada
