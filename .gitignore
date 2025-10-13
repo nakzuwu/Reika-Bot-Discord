@@ -1,3 +1,5 @@
 config.py
 venv
 fix
+bot_bans.json
+claimed_waifus.json
