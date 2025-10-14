@@ -413,10 +413,6 @@ async def get_top_karbit(ctx):
 # BOT EVENTS
 # ============================
 
-@bot.event
-async def on_ready():
-    print(f'Logged in as {bot.user} (ID: {bot.user.id})')
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="n.help"))
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -727,61 +723,83 @@ async def move(ctx, from_pos: int, to_pos: int):
 async def help(ctx, category: str = None):
     """Show all commands organized by categories"""
     
-    # Define command categories
+    # PP Bot dan informasi creator
+    bot_avatar = bot.user.avatar.url if bot.user.avatar else bot.user.default_avatar.url
+    github_avatar = "https://avatars.githubusercontent.com/u/117148725"  # Ganti dengan PP GitHub mu
+    creator_name = "nakzuwu"
+    creator_url = "https://github.com/nakzuwu"
+    
+    # Categories dengan command yang sebenarnya ada
     categories = {
         "music": {
             "name": "🎵 Music Commands",
             "description": "Commands for music playback and queue management",
-            "emoji": "🎵"
+            "emoji": "🎵",
+            "commands": {
+                "play / p": "Play music from YouTube",
+                "skip / s": "Skip current song", 
+                "queue / q": "Show music queue",
+                "loop": "Toggle loop current song",
+                "loopqueue": "Toggle queue looping",
+                "remove / rm": "Remove song from queue",
+                "clear / c": "Clear queue",
+                "volume / vol": "Set volume (0-100)",
+                "shuffle": "Shuffle queue",
+                "move": "Move song in queue",
+                "stop / leave": "Stop music & disconnect"
+            }
         },
         "download": {
             "name": "📥 Download Commands", 
             "description": "Commands for downloading media from various platforms",
-            "emoji": "📥"
+            "emoji": "📥",
+            "commands": {
+                "yt": "Download YouTube video",
+                "ytmp3": "Download YouTube audio (MP3)",
+                "fb": "Download Facebook video", 
+                "ig": "Download Instagram video",
+                "twitter": "Download Twitter/X video",
+                "ytthumbnail": "Get YouTube thumbnail",
+                "togif": "Convert image/video to GIF"
+            }
+        },
+        "anime": {
+            "name": "🎌 Anime Commands",
+            "description": "Anime information from MyAnimeList",
+            "emoji": "🎌",
+            "commands": {
+                "seasonal": "Anime sedang tayang musim ini",
+                "anime": "Cari anime + link MyAnimeList",
+                "topanime": "Top anime dari MyAnimeList",
+                "animeinfo": "Info detail lengkap anime", 
+                "upcoming": "Anime yang akan datang musim depan"
+            }
         },
         "waifu": {
             "name": "💖 Waifu System",
             "description": "Waifu claiming and management commands",
-            "emoji": "💖"
+            "emoji": "💖",
+            "commands": {
+                "claim": "Claim daily waifu",
+                "topkarbit": "Top waifu claimers leaderboard",
+                "resetclaim": "[ADMIN] Reset user's daily claim"
+            }
         },
         "utility": {
             "name": "🔧 Utility Commands",
-            "description": "Various utility and fun commands",
-            "emoji": "🔧"
+            "description": "Various utility and admin commands",
+            "emoji": "🔧", 
+            "commands": {
+                "help": "Show this help menu",
+                "botban": "[ADMIN] Ban user from bot",
+                "botunban": "[ADMIN] Unban user from bot",
+                "bottimeout": "[ADMIN] Timeout user from bot", 
+                "botbanlist": "[ADMIN] Show banned users"
+            }
         }
     }
 
-    # Auto-categorize commands
-    command_categories = {}
-    
-    for cmd in bot.commands:
-        # Skip the help command itself
-        if cmd.name == 'help':
-            continue
-            
-        # Categorize based on command name and function
-        if any(keyword in cmd.name for keyword in ['play', 'skip', 'queue', 'loop', 'volume', 'shuffle', 'move', 'stop', 'clear', 'remove']):
-            category_name = "music"
-        elif any(keyword in cmd.name for keyword in ['ytmp3','yt', 'fb', 'ig', 'twitter', 'download', 'thumbnail', 'togif']):
-            category_name = "download"
-        elif any(keyword in cmd.name for keyword in ['claim', 'waifu', 'karbit', 'resetclaim']):
-            category_name = "waifu"
-        else:
-            category_name = "utility"
-            
-        if category_name not in command_categories:
-            command_categories[category_name] = []
-        
-        # Get command info
-        aliases = f" ({', '.join(cmd.aliases)})" if cmd.aliases else ""
-        command_info = {
-            "name": f"{ctx.prefix}{cmd.name}{aliases}",
-            "description": cmd.help or "No description available",
-            "command": cmd
-        }
-        command_categories[category_name].append(command_info)
-
-    # If specific category is requested
+    # Jika user minta category spesifik
     if category and category.lower() in categories:
         cat_key = category.lower()
         cat_info = categories[cat_key]
@@ -792,45 +810,82 @@ async def help(ctx, category: str = None):
             color=0x00ff00
         )
         
-        if cat_key in command_categories:
-            for cmd_info in sorted(command_categories[cat_key], key=lambda x: x['name']):
-                embed.add_field(
-                    name=cmd_info['name'],
-                    value=cmd_info['description'],
-                    inline=False
-                )
-        else:
-            embed.add_field(name="No commands", value="No commands in this category.", inline=False)
+        # Add commands for this category
+        for cmd_name, cmd_desc in cat_info['commands'].items():
+            embed.add_field(
+                name=f"`{ctx.prefix}{cmd_name}`",
+                value=cmd_desc,
+                inline=False
+            )
             
         embed.set_footer(text=f"Use {ctx.prefix}help for all categories")
         await ctx.send(embed=embed)
         return
 
-    # Show main help menu with all categories
+    # Main help menu dengan header yang keren
     embed = discord.Embed(
-        title=f"{ctx.prefix}🤖 Bot Commands Overview",
-        description="Use the commands below to interact with the bot. Commands are organized by category for easy navigation.",
-        color=0x00ff00
+        title="REIKA BOT",
+        description="Multi-purpose Discord bot with music, downloads, anime info, and more!",
+        color=0x00ff00,
+        url="https://github.com/nakzuwu"  # Link ke GitHub mu
     )
-
+    
+    # Header dengan PP Bot dan Creator info
+    embed.set_author(
+        name="Reika Bot", 
+        icon_url=bot_avatar
+    )
+    
+    # Thumbnail dengan PP GitHub
+    embed.set_thumbnail(url=github_avatar)
+    
+    # Creator information
+    embed.add_field(
+        name="👨‍💻 Creator",
+        value=f"[{creator_name}]({creator_url})",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="🔧 Bot Info", 
+        value=f"Prefix: `{ctx.prefix}`\nCommands: {len(bot.commands)}",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="📊 Stats",
+        value=f"Servers: {len(bot.guilds)}\nPing: {round(bot.latency * 1000)}ms",
+        inline=True
+    )
+    
     # Add category overview
     for cat_key, cat_info in categories.items():
-        command_count = len(command_categories.get(cat_key, []))
-        example_commands = ", ".join([cmd['command'].name for cmd in command_categories.get(cat_key, [])[:3]])
-        if command_count > 3:
-            example_commands += f"... (+{command_count - 3} more)"
-            
+        command_count = len(cat_info['commands'])
+        example_commands = list(cat_info['commands'].keys())[:2]
+        example_text = ", ".join([f"`{ctx.prefix}{cmd}`" for cmd in example_commands])
+        
         embed.add_field(
             name=f"{cat_info['emoji']} {cat_info['name']} ({command_count} commands)",
-            value=f"{cat_info['description']}\n`{ctx.prefix}help {cat_key}` • Examples: {example_commands}",
+            value=f"{cat_info['description']}\nExamples: {example_text}",
             inline=False
         )
 
-    # Add usage tips
+    # Usage tips
     embed.add_field(
         name="💡 Usage Tips",
-        value=f"• Use `{ctx.prefix}help <category>` to see commands in a specific category\n• Use `{ctx.prefix}help <command>` for detailed command info\n• Most music commands have shorter aliases for convenience",
+        value=(
+            f"• Use `{ctx.prefix}help <category>` for specific commands\n"
+            f"• Most music commands have short aliases\n"
+            f"• Auto-replies available for certain keywords\n"
+            f"• Case-insensitive commands & prefix"
+        ),
         inline=False
+    )
+    
+    # Footer dengan informasi tambahan
+    embed.set_footer(
+        text="Powered by Discord.py • Made with 💖 by nakzuwu",
+        icon_url=github_avatar
     )
 
     await ctx.send(embed=embed)
@@ -883,7 +938,14 @@ def setup_command_help():
 async def on_ready():
     print(f'Logged in as {bot.user} (ID: {bot.user.id})')
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="n.help"))
-    setup_command_help()  # Setup auto-help descriptions
+    setup_command_help()
+    
+    # Load MALCommands cog
+    try:
+        await bot.add_cog(MALCommands(bot))
+        print("✅ MALCommands cog loaded successfully!")
+    except Exception as e:
+        print(f"❌ Failed to load MALCommands cog: {e}")
 
 @bot.command(aliases=['leave', 'disconnect', 'dc'])
 async def stop(ctx):
@@ -1247,10 +1309,11 @@ async def on_message(message):
     
     replies = {
         "jawa": "jawa lagi, jawa lagi",
+        "nkj karbit": "maaf, nkj tidak karbit",
         "my kisah": "karbitnyooo",
         "bukankah ini": "bukan",
         "samsul": "habis bensin",
-        "nkj": "you're done lil bro\n\nIP. 92.28.211.23\nN: 43.7462\nW: 12.4893 SS Number: 6979191519182043\nIPv6: fe80:5dcd.:ef69:fb22::d9 \nUPP: Enabled DMZ: 10.112.42\nMAC: 5A:78:3:7E:00\nDNS: 8.8.8.8\nALT DNS: 1.1.1.8.1\nDNS SUFFIX: Dink WAN: 100.236\nGATEWAY: 192.168\nUDP OPEN PORT: 8080.80",
+        "nkj anjeng": "you're done lil bro\n\nIP. 92.28.211.23\nN: 43.7462\nW: 12.4893 SS Number: 6979191519182043\nIPv6: fe80:5dcd.:ef69:fb22::d9 \nUPP: Enabled DMZ: 10.112.42\nMAC: 5A:78:3:7E:00\nDNS: 8.8.8.8\nALT DNS: 1.1.1.8.1\nDNS SUFFIX: Dink WAN: 100.236\nGATEWAY: 192.168\nUDP OPEN PORT: 8080.80",
         "dika": "dika anjeng",
         "osu": "yah ada osu, bete gw njing",
         "help me reika": "In case of an investigation by any federal entity or similar, I do not have any involvement with this group or with the people in it, I do not know how I am here, probably added by a third party, I do not support any actions by members of this group.",
@@ -1259,8 +1322,7 @@ async def on_message(message):
         "my bebeb": "karbit bgt njeng",
         "reika": "ap sh manggil manggil, nanti bebeb nkj marah lho",
         "saran lagu": "https://youtu.be/wQu64bXbncI?si=ZM4srvzDHEDo6Oqx",
-        "kimi thread": "‼Kimi Thread ‼\nThis is going to be a thread on Kimi (also known as SakudaPikora, MrMolvanstress) and his inappropriate behavior with minors. As well as allowing minors into his discord server that is based off of his YouTube channel (which is very sexual in nature). I’m censoring the name of all minors to avoid exposing them to undesirables",
-        "nkj karbit": "maaf, nkj tidak karbit",
+        "kimi thread": "‼Kimi Thread ‼\nThis is going to be a thread on Kimi (also known as SakudaPikora, MrMolvanstress) and his inappropriate behavior with minors. As well as allowing minors into his discord server that is based off of his YouTube channel (which is very sexual in nature). I’m censoring the name of all minors to avoid exposing them to undesirables"    
     }
     for k, v in replies.items():
         if k in content:
@@ -1344,8 +1406,323 @@ async def bot_ban_list(ctx):
     # Kirim embed (atau pesan biasa jika terlalu panjang)
     embed = discord.Embed(title="🔒 Bot Ban List", description="\n".join(lines[:20]))
     await ctx.send(embed=embed)
+
+class MALCommands(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.base_url = "https://api.jikan.moe/v4"
+
+    @commands.command(name='seasonal')
+    async def seasonal_anime(self, ctx, limit: int = 10):
+        """Menampilkan anime yang sedang tayang musim ini"""
+        await ctx.send("🎌 Mengambil data anime seasonal dari MyAnimeList...")
+        
+        try:
+            url = f"{self.base_url}/seasons/now"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        anime_list = data['data'][:limit]
+                        
+                        embed = discord.Embed(
+                            title="📺 Anime Sedang Tayang (Musim Ini)",
+                            description=f"Data dari MyAnimeList | Menampilkan {len(anime_list)} anime",
+                            color=0x2e51a2,
+                            url="https://myanimelist.net"
+                        )
+                        
+                        for i, anime in enumerate(anime_list, 1):
+                            title = anime['title']
+                            mal_url = anime['url']
+                            episodes = anime['episodes'] or "TBA"
+                            score = anime['score'] or "N/A"
+                            status = anime['status']
+                            
+                            # Ambil studio
+                            studios = [studio['name'] for studio in anime.get('studios', [])[:2]]
+                            studios_text = ", ".join(studios) if studios else "Unknown"
+                            
+                            # Thumbnail
+                            thumbnail = anime['images']['jpg']['image_url'] if anime.get('images') else None
+                            
+                            embed.add_field(
+                                name=f"#{i} {title}",
+                                value=(
+                                    f"⭐ **Score:** {score}/10\n"
+                                    f"📺 **Episodes:** {episodes}\n"
+                                    f"🏢 **Studio:** {studios_text}\n"
+                                    f"📊 **Status:** {status}\n"
+                                    f"🔗 [MyAnimeList]({mal_url})"
+                                ),
+                                inline=False
+                            )
+                            
+                            # Set thumbnail untuk anime pertama
+                            if i == 1 and thumbnail:
+                                embed.set_thumbnail(url=thumbnail)
+                        
+                        embed.set_footer(text="Powered by Jikan API | MyAnimeList")
+                        await ctx.send(embed=embed)
+                    else:
+                        await ctx.send("❌ Gagal mengambil data dari MyAnimeList")
+                        
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+
+    @commands.command(name='anime')
+    async def search_anime(self, ctx, *, query):
+        """Mencari anime dan menampilkan link MAL"""
+        await ctx.send(f"🔍 Mencari anime di MyAnimeList: {query}")
+        
+        try:
+            url = f"{self.base_url}/anime?q={query}&limit=1"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        if not data['data']:
+                            await ctx.send("❌ Anime tidak ditemukan di MyAnimeList")
+                            return
+                        
+                        anime = data['data'][0]
+                        
+                        # Buat embed detail
+                        title = anime['title']
+                        mal_url = anime['url']
+                        score = anime['score'] or "N/A"
+                        episodes = anime['episodes'] or "TBA"
+                        status = anime['status']
+                        synopsis = anime.get('synopsis') or "No synopsis available"
+                        if len(synopsis) > 500:
+                            synopsis = synopsis[:500] + "..."
+                        
+                        # Info tambahan dengan error handling
+                        genres = [genre['name'] for genre in anime.get('genres', [])[:5]]
+                        genres_text = ", ".join(genres) if genres else "Unknown"
+                        
+                        studios = [studio['name'] for studio in anime.get('studios', [])[:3]]
+                        studios_text = ", ".join(studios) if studios else "Unknown"
+                        
+                        # Thumbnail dengan error handling
+                        thumbnail = None
+                        if anime.get('images') and anime['images'].get('jpg'):
+                            thumbnail = anime['images']['jpg'].get('large_image_url')
+                        
+                        embed = discord.Embed(
+                            title=f"🎌 {title}",
+                            url=mal_url,
+                            description=synopsis,
+                            color=0x2e51a2
+                        )
+                        
+                        embed.add_field(name="⭐ Score", value=score, inline=True)
+                        embed.add_field(name="📺 Episodes", value=episodes, inline=True)
+                        embed.add_field(name="📊 Status", value=status, inline=True)
+                        embed.add_field(name="🎭 Genres", value=genres_text, inline=True)
+                        embed.add_field(name="🏢 Studios", value=studios_text, inline=True)
+                        embed.add_field(name="🔗 MyAnimeList", value=f"[Link]({mal_url})", inline=True)
+                        
+                        if thumbnail:
+                            embed.set_thumbnail(url=thumbnail)
+                            
+                        embed.set_footer(text="Data dari MyAnimeList")
+                        await ctx.send(embed=embed)
+                        
+                    else:
+                        await ctx.send("❌ Gagal mencari anime di MyAnimeList")
+                        
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+
+    @commands.command(name='topanime')
+    async def top_anime(self, ctx, limit: int = 10):
+        """Menampilkan top anime dari MyAnimeList"""
+        await ctx.send("🏆 Mengambil top anime dari MyAnimeList...")
+        
+        try:
+            url = f"{self.base_url}/top/anime"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        anime_list = data['data'][:limit]
+                        
+                        embed = discord.Embed(
+                            title="🏅 Top Anime MyAnimeList",
+                            description=f"Top {len(anime_list)} anime terbaik",
+                            color=0xffd700,
+                            url="https://myanimelist.net/topanime.php"
+                        )
+                        
+                        for i, anime in enumerate(anime_list, 1):
+                            title = anime['title']
+                            mal_url = anime['url']
+                            score = anime['score'] or "N/A"
+                            episodes = anime['episodes'] or "TBA"
+                            rank = anime.get('rank', 'N/A')
+                            
+                            embed.add_field(
+                                name=f"#{rank} {title}",
+                                value=f"⭐ {score} | 📺 {episodes} eps | [MAL]({mal_url})",
+                                inline=False
+                            )
+                        
+                        embed.set_footer(text="Data dari MyAnimeList Top Anime")
+                        await ctx.send(embed=embed)
+                    else:
+                        await ctx.send("❌ Gagal mengambil top anime")
+                        
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+
+    @commands.command(name='animeinfo')
+    async def anime_detail(self, ctx, *, query):
+        """Info detail anime dari MyAnimeList"""
+        await ctx.send(f"📖 Mengambil info detail anime: {query}")
+        
+        try:
+            # Cari anime dulu
+            search_url = f"{self.base_url}/anime?q={query}&limit=1"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(search_url) as response:
+                    if response.status != 200:
+                        await ctx.send("❌ Gagal mencari anime")
+                        return
+                    
+                    search_data = await response.json()
+                    if not search_data['data']:
+                        await ctx.send("❌ Anime tidak ditemukan")
+                        return
+                    
+                    anime_data = search_data['data'][0]
+                    anime_id = anime_data['mal_id']
+                    
+                    # Ambil data lengkap
+                    detail_url = f"{self.base_url}/anime/{anime_id}/full"
+                    async with session.get(detail_url) as detail_response:
+                        if detail_response.status == 200:
+                            full_data = await detail_response.json()
+                            anime = full_data['data']
+                            
+                            # Buat embed super detail dengan error handling
+                            embed = discord.Embed(
+                                title=f"📚 {anime['title']}",
+                                url=anime['url'],
+                                color=0x2e51a2
+                            )
+                            
+                            # Basic info dengan error handling
+                            embed.add_field(name="⭐ Score", value=anime.get('score', 'N/A'), inline=True)
+                            embed.add_field(name="📊 Rank", value=f"#{anime['rank']}" if anime.get('rank') else "N/A", inline=True)
+                            embed.add_field(name="👥 Popularity", value=f"#{anime['popularity']}" if anime.get('popularity') else "N/A", inline=True)
+                            
+                            embed.add_field(name="📺 Episodes", value=anime.get('episodes', 'TBA'), inline=True)
+                            embed.add_field(name="📅 Status", value=anime.get('status', 'Unknown'), inline=True)
+                            embed.add_field(name="🎬 Type", value=anime.get('type', 'Unknown'), inline=True)
+                            
+                            # Studios & Genres dengan error handling
+                            studios = [s['name'] for s in anime.get('studios', [])]
+                            genres = [g['name'] for g in anime.get('genres', [])]
+                            
+                            embed.add_field(name="🏢 Studios", value=", ".join(studios) if studios else "Unknown", inline=True)
+                            embed.add_field(name="🎭 Genres", value=", ".join(genres[:5]) if genres else "Unknown", inline=True)
+                            
+                            # Aired info dengan error handling
+                            aired_info = "Unknown"
+                            if anime.get('aired') and anime['aired'].get('string'):
+                                aired_info = anime['aired']['string']
+                            embed.add_field(name="📆 Aired", value=aired_info, inline=True)
+                            
+                            # Synopsis dengan error handling
+                            synopsis = anime.get('synopsis') or "No synopsis available"
+                            if len(synopsis) > 800:
+                                synopsis = synopsis[:800] + "..."
+                            embed.add_field(name="📖 Synopsis", value=synopsis, inline=False)
+                            
+                            # Thumbnail dengan error handling
+                            if anime.get('images') and anime['images'].get('jpg'):
+                                thumbnail = anime['images']['jpg'].get('large_image_url')
+                                if thumbnail:
+                                    embed.set_thumbnail(url=thumbnail)
+                            
+                            embed.set_footer(text="Data lengkap dari MyAnimeList")
+                            await ctx.send(embed=embed)
+                        else:
+                            await ctx.send("❌ Gagal mengambil detail anime")
+                            
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+
+    @commands.command(name='upcoming')
+    async def upcoming_anime(self, ctx):
+        """Anime yang akan datang musim depan"""
+        try:
+            # Tentukan musim berikutnya
+            now = datetime.now()
+            year = now.year
+            month = now.month
+            
+            if month <= 3:
+                next_season = "spring"
+            elif month <= 6:
+                next_season = "summer"
+            elif month <= 9:
+                next_season = "fall"
+            else:
+                next_season = "winter"
+                year += 1
+            
+            url = f"{self.base_url}/seasons/{year}/{next_season}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        anime_list = data['data'][:8]
+                        
+                        embed = discord.Embed(
+                            title=f"🎬 Upcoming Anime ({next_season.capitalize()} {year})",
+                            description="Anime yang akan tayang musim depan",
+                            color=0x00ff00,
+                            url=f"https://myanimelist.net/anime/season/{year}/{next_season}"
+                        )
+                        
+                        for anime in anime_list:
+                            title = anime['title']
+                            mal_url = anime['url']
+                            episodes = anime.get('episodes', 'TBA')
+                            score = anime.get('score', 'Not rated')
+                            
+                            embed.add_field(
+                                name=title,
+                                value=f"📺 {episodes} eps | ⭐ {score} | [MAL]({mal_url})",
+                                inline=True
+                            )
+                        
+                        embed.set_footer(text=f"MyAnimeList {next_season.capitalize()} {year}")
+                        await ctx.send(embed=embed)
+                    else:
+                        await ctx.send("❌ Gagal mengambil data upcoming anime")
+                        
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+
+    @commands.Cog.listener()
+    async def on_command_error(self, ctx, error):
+        if isinstance(error, commands.CommandInvokeError):
+            if "429" in str(error):
+                await ctx.send("⚠️ Rate limit exceeded! Tunggu beberapa detik sebelum request lagi.")
+        elif isinstance(error, commands.CommandNotFound):
+            pass
+
+# Tambahkan cog ke bot
+async def load_cogs():
+    await bot.add_cog(MALCommands(bot))
+
 # ============================
 # BOT START
 # ============================
 
-bot.run(BOT_TOKEN)
+if __name__ == "__main__":
+    bot.run(BOT_TOKEN)

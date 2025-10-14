@@ -1,5 +1,5 @@
 config.py
-venv
+venv/
 fix
 bot_bans.json
 claimed_waifus.json
