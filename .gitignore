@@ -3,3 +3,5 @@ venv
 fix
 bot_bans.json
 claimed_waifus.json
+__pycache__
+claims.json

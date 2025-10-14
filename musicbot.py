@@ -109,7 +109,8 @@ intents.voice_states = True
 bot = commands.Bot(
     command_prefix=PREFIX,
     intents=intents,
-    help_command=None
+    help_command=None,
+    case_insensitive=True 
 )
 
 # ============================
@@ -441,117 +442,122 @@ async def play(ctx, *, query):
     """Play a song or add to queue - supports playlists"""
     if not ctx.author.voice:
         return await ctx.send("🚫 You need to be in a voice channel!")
-    
+
+    # Bersihkan query
+    clean_query = query.strip()
+    if not clean_query:
+        return await ctx.send("🚫 Please provide a song name or URL")
+
+    # Pastikan bot langsung join voice channel dulu
+    voice_client = ctx.voice_client
+    if not voice_client:
+        try:
+            await ctx.author.voice.channel.connect()
+            await ctx.send("✅ Connected to voice channel! 🎶")
+        except Exception as e:
+            return await ctx.send(f"❌ Failed to connect to voice channel: {e}")
+
+    # Kirim pesan status agar user tahu sedang mencari lagu
+    status_msg = await ctx.send("🎧 Searching for the song, please wait...")
+
     async with ctx.typing():
         try:
-            # Clean the query
-            clean_query = query.strip()
-            if not clean_query:
-                return await ctx.send("🚫 Please provide a song name or URL")
-
-            # Check if it's a playlist URL
+            # Cek apakah playlist
             if 'list=' in clean_query.lower() and ('youtube.com' in clean_query.lower() or 'youtu.be' in clean_query.lower()):
                 try:
-                    # Create playlist extractor
                     ytdl_playlist = youtube_dl.YoutubeDL({
                         **ytdl_format_options,
                         'extract_flat': True,
                         'noplaylist': False
                     })
-                    
-                    # Get playlist info
+
                     playlist_data = await bot.loop.run_in_executor(
-                        None, 
+                        None,
                         lambda: ytdl_playlist.extract_info(clean_query, download=False)
                     )
-                    
+
                     if not playlist_data or 'entries' not in playlist_data:
-                        return await ctx.send("❌ Couldn't process that playlist or playlist is empty")
-                    
+                        await status_msg.edit(content="❌ Couldn't process that playlist or playlist is empty")
+                        return
+
                     songs = []
                     for entry in playlist_data['entries']:
                         if entry:
                             songs.append(Song(entry, ctx.author))
-                            if len(songs) >= 100:  # Limit to 100 songs
+                            if len(songs) >= 100:
                                 break
-                    
+
                     if not songs:
-                        return await ctx.send("❌ No valid songs found in playlist")
-                    
-                    # Connect to voice channel
-                    if not ctx.voice_client:
-                        await ctx.author.voice.channel.connect()
-                    
-                    # Add songs to queue
+                        await status_msg.edit(content="❌ No valid songs found in playlist")
+                        return
+
+                    # Tambah ke queue
                     player.playlist_mode = True
                     for song in songs:
                         player.queue.append(song)
                     player.playlist_mode = False
-                    
-                    # Start playing if not already playing
+
+                    # Mainkan jika belum main
                     if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
                         await play_next(ctx)
-                    
-                    return await ctx.send(f"🎵 Added {len(songs)} songs from playlist: {playlist_data['title']}")
-                
-                except Exception as e:
-                    return await ctx.send(f"❌ Playlist error: {str(e)}")
 
-            # Handle single song search
-            try:
-                # Create new YTDL instance for this search
-                with youtube_dl.YoutubeDL(ytdl_format_options) as ytdl_instance:
-                    # Determine if it's a URL or search query
-                    if clean_query.startswith(('http://', 'https://')):
-                        data = await bot.loop.run_in_executor(
-                            None, 
-                            lambda: ytdl_instance.extract_info(clean_query, download=False)
-                        )
-                    else:
-                        data = await bot.loop.run_in_executor(
-                            None, 
-                            lambda: ytdl_instance.extract_info(f"ytsearch:{clean_query}", download=False)
-                        )
-                    
-                    if not data:
-                        return await ctx.send("❌ No results found")
-                    
-                    if 'entries' in data:
-                        if not data['entries']:
-                            return await ctx.send("❌ No results found")
-                        data = data['entries'][0]
-                    
-                    song = Song(data, ctx.author)
-                    
-                    # Connect to voice channel
-                    if not ctx.voice_client:
-                        await ctx.author.voice.channel.connect()
-                    
-                    # Add to queue or play immediately
-                    if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-                        player.queue.append(song)
-                        embed = discord.Embed(
-                            description=f"🎵 Added to queue: [{song.title}]({song.url})",
-                            color=0x00ff00
-                        )
-                        embed.set_footer(text=f"Requested by {ctx.author.display_name}")
-                        await ctx.send(embed=embed)
-                    else:
-                        await play_song(ctx.voice_client, song)
-                        embed = discord.Embed(
-                            description=f"🎶 Now playing: [{song.title}]({song.url})",
-                            color=0x00ff00
-                        )
-                        embed.set_footer(text=f"Requested by {ctx.author.display_name}")
-                        if song.thumbnail:
-                            embed.set_thumbnail(url=song.thumbnail)
-                        await ctx.send(embed=embed)
-            
-            except Exception as e:
-                await ctx.send(f"❌ Error processing song: {str(e)}")
+                    await status_msg.edit(content=f"🎵 Added {len(songs)} songs from playlist: **{playlist_data['title']}**")
+
+                except Exception as e:
+                    await status_msg.edit(content=f"❌ Playlist error: {str(e)}")
+
+            # Kalau bukan playlist → lagu tunggal
+            else:
+                try:
+                    with youtube_dl.YoutubeDL(ytdl_format_options) as ytdl_instance:
+                        if clean_query.startswith(('http://', 'https://')):
+                            data = await bot.loop.run_in_executor(
+                                None,
+                                lambda: ytdl_instance.extract_info(clean_query, download=False)
+                            )
+                        else:
+                            data = await bot.loop.run_in_executor(
+                                None,
+                                lambda: ytdl_instance.extract_info(f"ytsearch:{clean_query}", download=False)
+                            )
+
+                        if not data:
+                            await status_msg.edit(content="❌ No results found")
+                            return
+
+                        if 'entries' in data:
+                            if not data['entries']:
+                                await status_msg.edit(content="❌ No results found")
+                                return
+                            data = data['entries'][0]
+
+                        song = Song(data, ctx.author)
+
+                        # Tambahkan ke antrian atau mainkan langsung
+                        if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+                            player.queue.append(song)
+                            embed = discord.Embed(
+                                description=f"🎵 Added to queue: [{song.title}]({song.url})",
+                                color=0x00ff00
+                            )
+                            embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+                            await status_msg.edit(content=None, embed=embed)
+                        else:
+                            await play_song(ctx.voice_client, song)
+                            embed = discord.Embed(
+                                description=f"🎶 Now playing: [{song.title}]({song.url})",
+                                color=0x00ff00
+                            )
+                            embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+                            if song.thumbnail:
+                                embed.set_thumbnail(url=song.thumbnail)
+                            await status_msg.edit(content=None, embed=embed)
+
+                except Exception as e:
+                    await status_msg.edit(content=f"❌ Error processing song: {str(e)}")
 
         except Exception as e:
-            await ctx.send(f"❌ Unexpected error: {str(e)}")
+            await status_msg.edit(content=f"❌ Unexpected error: {str(e)}")
 
 @bot.command(aliases=['q'])
 async def queue(ctx, page: int = 1):
@@ -879,7 +885,7 @@ async def on_ready():
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="n.help"))
     setup_command_help()  # Setup auto-help descriptions
 
-@bot.command()
+@bot.command(aliases=['leave', 'disconnect', 'dc'])
 async def stop(ctx):
     """Stop playback and disconnect"""
     if not ctx.voice_client:
@@ -1240,18 +1246,21 @@ async def on_message(message):
     content = message.content.lower()
     
     replies = {
-        "jawa": "🗿 jawa lagi, jawa lagi...",
-        "my kisah": "💔 karbitnyooo~",
-        "bukankah ini": "Bukan~",
+        "jawa": "jawa lagi, jawa lagi",
+        "my kisah": "karbitnyooo",
+        "bukankah ini": "bukan",
         "samsul": "habis bensin",
         "nkj": "you're done lil bro\n\nIP. 92.28.211.23\nN: 43.7462\nW: 12.4893 SS Number: 6979191519182043\nIPv6: fe80:5dcd.:ef69:fb22::d9 \nUPP: Enabled DMZ: 10.112.42\nMAC: 5A:78:3:7E:00\nDNS: 8.8.8.8\nALT DNS: 1.1.1.8.1\nDNS SUFFIX: Dink WAN: 100.236\nGATEWAY: 192.168\nUDP OPEN PORT: 8080.80",
         "dika": "dika anjeng",
+        "osu": "yah ada osu, bete gw njing",
         "help me reika": "In case of an investigation by any federal entity or similar, I do not have any involvement with this group or with the people in it, I do not know how I am here, probably added by a third party, I do not support any actions by members of this group.",
         "lala": "Bete njing ada lala",
         "bedwar": "bising bodo aku nak tido",
-        "my bebeb": f"ada apa nih beb {message.author.mention}~ 💕",
-        "lapar": "🍜 makan sana, nanti masuk angin~",
-        "reika": "Iya? dipanggil-panggil aja 😳"
+        "my bebeb": "karbit bgt njeng",
+        "reika": "ap sh manggil manggil, nanti bebeb nkj marah lho",
+        "saran lagu": "https://youtu.be/wQu64bXbncI?si=ZM4srvzDHEDo6Oqx",
+        "kimi thread": "‼Kimi Thread ‼\nThis is going to be a thread on Kimi (also known as SakudaPikora, MrMolvanstress) and his inappropriate behavior with minors. As well as allowing minors into his discord server that is based off of his YouTube channel (which is very sexual in nature). I’m censoring the name of all minors to avoid exposing them to undesirables",
+        "nkj karbit": "maaf, nkj tidak karbit",
     }
     for k, v in replies.items():
         if k in content:
