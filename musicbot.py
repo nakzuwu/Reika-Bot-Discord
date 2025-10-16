@@ -12,10 +12,23 @@ from collections import deque
 from config import BOT_TOKEN, PREFIX
 import time
 import moviepy as mp
+import lyricsgenius
 from PIL import Image
 
 # Suppress noise
 # youtube_dl.utils.bug_reports_message = lambda: ''
+
+GENIUS_API_KEY = "OR8FVnzUuaZ5fTny2Ni9nLuYjO0_JuAXrYQstoxegePX2dBehj-vXMKKLkDu5iNY"
+
+if GENIUS_API_KEY:
+    genius = lyricsgenius.Genius(GENIUS_API_KEY)
+    # Optional: Configure genius
+    genius.verbose = False  # Non-aktifkan verbose output
+    genius.remove_section_headers = True  # Hapus section headers seperti [Chorus]
+    genius.skip_non_songs = True  # Skip non-songs
+else:
+    genius = None
+    print("⚠️  Genius API key not set. Lyrics feature will be disabled.")
 
 # ============================
 # CONFIGURATION & CONSTANTS
@@ -67,34 +80,58 @@ class Song:
         minutes, seconds = divmod(self.duration, 60)
         return f"{minutes}:{seconds:02d}"
 
+# Ganti player global dengan dictionary untuk menyimpan player per guild
 class MusicPlayer:
     def __init__(self):
-        self.queue = deque()
-        self.loop = False
-        self.loop_queue = False
-        self.current_song = None
-        self.volume = 0.5
-        self.playlist_mode = False 
+        self.players = {}  # {guild_id: Player}
+        self.default_volume = 0.5
     
-    def remove(self, index: int):
-        if 1 <= index <= len(self.queue):
-            return self.queue.remove(self.queue[index-1])
-        return None
+    def get_player(self, guild_id):
+        if guild_id not in self.players:
+            self.players[guild_id] = {
+                'queue': [],
+                'current_song': None,
+                'volume': self.default_volume,
+                'loop': False,
+                'loop_queue': False,
+                'playlist_mode': False
+            }
+        return self.players[guild_id]
     
-    def clear(self):
-        self.queue.clear()
+    def __getattr__(self, name):
+        # Fallback untuk backward compatibility sementara
+        if name in ['queue', 'current_song', 'volume', 'loop', 'loop_queue', 'playlist_mode']:
+            return None
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+player = MusicPlayer()
+
+# Helper functions untuk mengakses player dengan guild_id
+def get_guild_player(ctx):
+    return player.get_player(ctx.guild.id)
+
+async def play_next(ctx):
+    guild_player = get_guild_player(ctx)
+    voice_client = ctx.voice_client
     
-    def shuffle(self):
-        import random
-        random.shuffle(self.queue)
+    if not voice_client:
+        return
     
-    def move(self, from_pos: int, to_pos: int):
-        if 1 <= from_pos <= len(self.queue) and 1 <= to_pos <= len(self.queue):
-            song = self.queue[from_pos-1]
-            del self.queue[from_pos-1]
-            self.queue.insert(to_pos-1, song)
-            return song
-        return None
+    if guild_player['loop'] and guild_player['current_song']:
+        # Loop current song
+        await play_song(voice_client, guild_player['current_song'])
+        return
+    
+    if guild_player['queue']:
+        next_song = guild_player['queue'].pop(0)
+        guild_player['current_song'] = next_song
+        await play_song(voice_client, next_song)
+        
+        # Jika loop queue, tambahkan kembali ke akhir queue
+        if guild_player['loop_queue']:
+            guild_player['queue'].append(next_song)
+    else:
+        guild_player['current_song'] = None
 
 # ============================
 # BOT SETUP
@@ -142,31 +179,86 @@ def after_playing(error):
     asyncio.run_coroutine_threadsafe(coro, bot.loop)
 
 async def play_song(voice_client, song):
-    player.current_song = song
+    """Play a song in voice channel"""
     try:
-        data = await bot.loop.run_in_executor(None, lambda: ytdl.extract_info(song.url, download=False))
-        filename = data['url']
-        source = discord.FFmpegPCMAudio(filename, **ffmpeg_options)
-        source = discord.PCMVolumeTransformer(source, volume=player.volume)
-        voice_client.play(source, after=after_playing)
+        # Dapatkan guild_id dari context yang berbeda
+        if hasattr(voice_client, 'guild'):
+            guild_id = voice_client.guild.id
+        else:
+            # Fallback: cari guild dari channel
+            guild_id = voice_client.channel.guild.id
+            
+        guild_player = get_guild_player_by_id(guild_id)
+        
+        with youtube_dl.YoutubeDL(ytdl_format_options) as ytdl:
+            data = await bot.loop.run_in_executor(
+                None,
+                lambda: ytdl.extract_info(song.url, download=False)
+            )
+            
+            if 'url' in data:
+                audio_url = data['url']
+            else:
+                # Fallback untuk format yang berbeda
+                formats = data.get('formats', [])
+                audio_format = next((f for f in formats if f.get('acodec') != 'none' and not f.get('filesize')), None)
+                if audio_format:
+                    audio_url = audio_format['url']
+                else:
+                    raise Exception("No playable audio format found")
+            
+            # Buat audio source dengan volume yang sesuai
+            source = discord.FFmpegPCMAudio(
+                audio_url,
+                before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+                options='-vn'
+            )
+            
+            volume = guild_player['volume']
+            voice_client.play(
+                discord.PCMVolumeTransformer(source, volume=volume),
+                after=lambda e: asyncio.run_coroutine_threadsafe(
+                    play_next_by_guild(guild_id), 
+                    bot.loop
+                ) if e is None else print(f'Player error: {e}')
+            )
+            
     except Exception as e:
-        print(f'Error playing song: {e}')
-        if voice_client.is_connected():
-            voice_client.stop()
-
-async def play_next(ctx):
-    """Play the next song in queue"""
-    if player.queue:
-        next_song = player.queue.popleft()
-        await play_song(ctx.voice_client, next_song)
-        embed = discord.Embed(
-            description=f"🎶 Now playing: [{next_song.title}]({next_song.url})",
-            color=0x00ff00
+        print(f"Error playing song: {e}")
+        # Coba play next song jika error
+        asyncio.run_coroutine_threadsafe(
+            play_next_by_guild(guild_id), 
+            bot.loop
         )
-        embed.set_footer(text=f"Requested by {next_song.requester.display_name}")
-        if next_song.thumbnail:
-            embed.set_thumbnail(url=next_song.thumbnail)
-        await ctx.send(embed=embed)
+
+# Helper function untuk play_next dengan guild_id
+async def play_next_by_guild(guild_id):
+    """Play next song for specific guild"""
+    # Cari voice_client berdasarkan guild_id
+    for voice_client in bot.voice_clients:
+        if voice_client.guild.id == guild_id:
+            ctx = await get_context_from_guild(guild_id)
+            if ctx:
+                await play_next(ctx)
+            break
+
+async def get_context_from_guild(guild_id):
+    """Create a minimal context from guild_id"""
+    guild = bot.get_guild(guild_id)
+    if guild and guild.text_channels:
+        # Use first text channel as fallback context
+        channel = guild.text_channels[0]
+        # Create minimal context-like object
+        class SimpleContext:
+            def __init__(self, guild, channel):
+                self.guild = guild
+                self.channel = channel
+        return SimpleContext(guild, channel)
+    return None
+
+def get_guild_player_by_id(guild_id):
+    """Get player by guild_id directly"""
+    return player.get_player(guild_id)
 
 async def process_playlist(url, requester):
     """Extract all songs from a playlist"""
@@ -432,19 +524,15 @@ async def on_voice_state_update(member, before, after):
 # ============================
 # MUSIC COMMANDS
 # ============================
-
 @bot.command(aliases=['p'])
 async def play(ctx, *, query):
-    """Play a song or add to queue - supports playlists"""
     if not ctx.author.voice:
         return await ctx.send("🚫 You need to be in a voice channel!")
 
-    # Bersihkan query
     clean_query = query.strip()
     if not clean_query:
         return await ctx.send("🚫 Please provide a song name or URL")
 
-    # Pastikan bot langsung join voice channel dulu
     voice_client = ctx.voice_client
     if not voice_client:
         try:
@@ -453,12 +541,11 @@ async def play(ctx, *, query):
         except Exception as e:
             return await ctx.send(f"❌ Failed to connect to voice channel: {e}")
 
-    # Kirim pesan status agar user tahu sedang mencari lagu
     status_msg = await ctx.send("🎧 Searching for the song, please wait...")
+    guild_player = get_guild_player(ctx)
 
     async with ctx.typing():
         try:
-            # Cek apakah playlist
             if 'list=' in clean_query.lower() and ('youtube.com' in clean_query.lower() or 'youtu.be' in clean_query.lower()):
                 try:
                     ytdl_playlist = youtube_dl.YoutubeDL({
@@ -487,11 +574,11 @@ async def play(ctx, *, query):
                         await status_msg.edit(content="❌ No valid songs found in playlist")
                         return
 
-                    # Tambah ke queue
-                    player.playlist_mode = True
+                    # Tambah ke queue guild-specific
+                    guild_player['playlist_mode'] = True
                     for song in songs:
-                        player.queue.append(song)
-                    player.playlist_mode = False
+                        guild_player['queue'].append(song)
+                    guild_player['playlist_mode'] = False
 
                     # Mainkan jika belum main
                     if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
@@ -502,7 +589,6 @@ async def play(ctx, *, query):
                 except Exception as e:
                     await status_msg.edit(content=f"❌ Playlist error: {str(e)}")
 
-            # Kalau bukan playlist → lagu tunggal
             else:
                 try:
                     with youtube_dl.YoutubeDL(ytdl_format_options) as ytdl_instance:
@@ -529,9 +615,9 @@ async def play(ctx, *, query):
 
                         song = Song(data, ctx.author)
 
-                        # Tambahkan ke antrian atau mainkan langsung
+                        # Tambahkan ke antrian guild-specific
                         if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-                            player.queue.append(song)
+                            guild_player['queue'].append(song)
                             embed = discord.Embed(
                                 description=f"🎵 Added to queue: [{song.title}]({song.url})",
                                 color=0x00ff00
@@ -539,6 +625,7 @@ async def play(ctx, *, query):
                             embed.set_footer(text=f"Requested by {ctx.author.display_name}")
                             await status_msg.edit(content=None, embed=embed)
                         else:
+                            guild_player['current_song'] = song
                             await play_song(ctx.voice_client, song)
                             embed = discord.Embed(
                                 description=f"🎶 Now playing: [{song.title}]({song.url})",
@@ -557,39 +644,38 @@ async def play(ctx, *, query):
 
 @bot.command(aliases=['q'])
 async def queue(ctx, page: int = 1):
-    """Show current queue"""
-    if not player.queue and not player.current_song:
+    guild_player = get_guild_player(ctx)
+    
+    if not guild_player['queue'] and not guild_player['current_song']:
         return await ctx.send("ℹ️ The queue is empty!")
 
-    items_per_page = 5  # Reduced from 10 to be safer
-    pages = max(1, (len(player.queue) + items_per_page - 1) // items_per_page)
+    items_per_page = 5
+    pages = max(1, (len(guild_player['queue']) + items_per_page - 1) // items_per_page)
     page = max(1, min(page, pages))
 
     embed = discord.Embed(title="🎧 Music Queue", color=0x00ff00)
     
-    # Current playing song
-    if player.current_song:
-        current_song_text = f"[{player.current_song.title}]({player.current_song.url})"
-        if len(current_song_text) > 256:  # Truncate if too long
-            current_song_text = f"{player.current_song.title[:200]}... (click for full)"
+    if guild_player['current_song']:
+        current_song_text = f"[{guild_player['current_song'].title}]({guild_player['current_song'].url})"
+        if len(current_song_text) > 256:
+            current_song_text = f"{guild_player['current_song'].title[:200]}... (click for full)"
         
         embed.add_field(
             name="Now Playing",
             value=f"{current_song_text}\n"
-                  f"⏳ {player.current_song.format_duration()} | "
-                  f"Requested by {player.current_song.requester.mention}",
+                  f"⏳ {guild_player['current_song'].format_duration()} | "
+                  f"Requested by {guild_player['current_song'].requester.mention}",
             inline=False
         )
 
-    # Queue items
-    if player.queue:
+    if guild_player['queue']:
         start = (page - 1) * items_per_page
         end = start + items_per_page
         
         queue_list = []
-        for i, song in enumerate(list(player.queue)[start:end], start=start+1):
+        for i, song in enumerate(list(guild_player['queue'])[start:end], start=start+1):
             song_text = f"[{song.title}]({song.url})"
-            if len(song_text) > 100:  # Truncate long titles
+            if len(song_text) > 100:
                 song_text = f"{song.title[:80]}... (click for full)"
             
             queue_item = (
@@ -597,11 +683,8 @@ async def queue(ctx, page: int = 1):
                 f"⏳ {song.format_duration()} | "
                 f"Requested by {song.requester.mention}"
             )
-            
-            # Ensure each item doesn't exceed 200 chars
             queue_list.append(queue_item[:200])
 
-        # Split into chunks if needed
         queue_text = "\n\n".join(queue_list)
         if len(queue_text) > 1024:
             queue_text = queue_text[:1000] + "\n... (queue too long to display fully)"
@@ -612,11 +695,10 @@ async def queue(ctx, page: int = 1):
             inline=False
         )
 
-    # Loop status
     status = []
-    if player.loop:
+    if guild_player['loop']:
         status.append("🔂 Single Loop")
-    if player.loop_queue:
+    if guild_player['loop_queue']:
         status.append("🔁 Queue Loop")
     
     if status:
@@ -625,14 +707,14 @@ async def queue(ctx, page: int = 1):
     try:
         await ctx.send(embed=embed)
     except discord.HTTPException as e:
-        # Fallback if embed is still too large
-        simple_msg = f"Now Playing: {player.current_song.title if player.current_song else 'Nothing'}\n"
-        simple_msg += f"Queue: {len(player.queue)} songs (use n.queue with page number to view)"
+        simple_msg = f"Now Playing: {guild_player['current_song'].title if guild_player['current_song'] else 'Nothing'}\n"
+        simple_msg += f"Queue: {len(guild_player['queue'])} songs (use n.queue with page number to view)"
         await ctx.send(simple_msg)
+
+
 
 @bot.command(aliases=['s'])
 async def skip(ctx):
-    """Skip current song"""
     if not ctx.voice_client or not ctx.voice_client.is_playing():
         return await ctx.send("ℹ️ Nothing is currently playing!")
     
@@ -641,28 +723,28 @@ async def skip(ctx):
 
 @bot.command()
 async def loop(ctx):
-    """Toggle loop for current song"""
-    player.loop = not player.loop
-    player.loop_queue = False if player.loop else player.loop_queue
-    await ctx.message.add_reaction("🔂" if player.loop else "➡️")
+    guild_player = get_guild_player(ctx)
+    guild_player['loop'] = not guild_player['loop']
+    guild_player['loop_queue'] = False if guild_player['loop'] else guild_player['loop_queue']
+    await ctx.message.add_reaction("🔂" if guild_player['loop'] else "➡️")
 
 @bot.command()
 async def loopqueue(ctx):
-    """Toggle queue looping"""
-    player.loop_queue = not player.loop_queue
-    player.loop = False if player.loop_queue else player.loop
-    await ctx.message.add_reaction("🔁" if player.loop_queue else "➡️")
+    guild_player = get_guild_player(ctx)
+    guild_player['loop_queue'] = not guild_player['loop_queue']
+    guild_player['loop'] = False if guild_player['loop_queue'] else guild_player['loop']
+    await ctx.message.add_reaction("🔁" if guild_player['loop_queue'] else "➡️")
 
 @bot.command(aliases=['rm'])
 async def remove(ctx, index: int):
-    """Remove a song from queue"""
-    if not player.queue:
+    guild_player = get_guild_player(ctx)
+    if not guild_player['queue']:
         return await ctx.send("ℹ️ The queue is empty!")
     
-    if index < 1 or index > len(player.queue):
-        return await ctx.send(f"🚫 Please provide a valid position (1-{len(player.queue)})")
+    if index < 1 or index > len(guild_player['queue']):
+        return await ctx.send(f"🚫 Please provide a valid position (1-{len(guild_player['queue'])})")
     
-    removed = player.remove(index)
+    removed = guild_player['queue'].pop(index - 1)
     embed = discord.Embed(
         description=f"🗑️ Removed: [{removed.title}]({removed.url})",
         color=0x00ff00
@@ -672,52 +754,142 @@ async def remove(ctx, index: int):
 
 @bot.command(aliases=['c'])
 async def clear(ctx):
-    """Clear the queue"""
-    if not player.queue:
+    guild_player = get_guild_player(ctx)
+    if not guild_player['queue']:
         return await ctx.send("ℹ️ The queue is already empty!")
     
-    player.clear()
+    guild_player['queue'].clear()
     await ctx.message.add_reaction("🧹")
 
 @bot.command(aliases=['vol'])
 async def volume(ctx, volume: int = None):
-    """Set volume (0-100)"""
+    guild_player = get_guild_player(ctx)
     if volume is None:
-        return await ctx.send(f"🔊 Current volume: {int(player.volume * 100)}%")
+        return await ctx.send(f"🔊 Current volume: {int(guild_player['volume'] * 100)}%")
     
     if volume < 0 or volume > 100:
         return await ctx.send("🚫 Volume must be between 0 and 100")
     
-    player.volume = volume / 100
+    guild_player['volume'] = volume / 100
     if ctx.voice_client and ctx.voice_client.source:
-        ctx.voice_client.source.volume = player.volume
+        ctx.voice_client.source.volume = guild_player['volume']
     
     await ctx.message.add_reaction("🔊")
 
 @bot.command()
 async def shuffle(ctx):
-    """Shuffle the queue"""
-    if len(player.queue) < 2:
+    guild_player = get_guild_player(ctx)
+    if len(guild_player['queue']) < 2:
         return await ctx.send("ℹ️ Need at least 2 songs in queue to shuffle!")
     
-    player.shuffle()
+    import random
+    random.shuffle(guild_player['queue'])
     await ctx.message.add_reaction("🔀")
 
 @bot.command(aliases=['mv'])
 async def move(ctx, from_pos: int, to_pos: int):
-    """Move song in queue"""
-    if len(player.queue) < 2:
+    guild_player = get_guild_player(ctx)
+    if len(guild_player['queue']) < 2:
         return await ctx.send("ℹ️ Need at least 2 songs in queue to move!")
     
-    moved = player.move(from_pos, to_pos)
-    if not moved:
-        return await ctx.send(f"🚫 Invalid positions (1-{len(player.queue)})")
+    if from_pos < 1 or from_pos > len(guild_player['queue']) or to_pos < 1 or to_pos > len(guild_player['queue']):
+        return await ctx.send(f"🚫 Invalid positions (1-{len(guild_player['queue'])})")
+    
+    from_idx = from_pos - 1
+    to_idx = to_pos - 1
+    
+    if from_idx == to_idx:
+        return await ctx.send("🚫 Positions are the same!")
+    
+    moved_song = guild_player['queue'].pop(from_idx)
+    guild_player['queue'].insert(to_idx, moved_song)
     
     embed = discord.Embed(
-        description=f"↕️ Moved [{moved.title}]({moved.url}) from position {from_pos} to {to_pos}",
+        description=f"↕️ Moved [{moved_song.title}]({moved_song.url}) from position {from_pos} to {to_pos}",
         color=0x00ff00
     )
     await ctx.send(embed=embed)
+
+@bot.command(aliases=['l', 'lyric'])
+async def lyrics(ctx, *, song_name: str = None):
+    """Get lyrics for current song or specified song"""
+    
+    if not genius:
+        return await ctx.send("❌ Lyrics feature is not configured. Please set up Genius API key.")
+    
+    # Jika tidak ada input, gunakan lagu yang sedang diputar
+    if song_name is None:
+        guild_player = get_guild_player(ctx)
+        if not guild_player['current_song']:
+            return await ctx.send("❌ No song is currently playing! Please specify a song name.")
+        
+        song_name = guild_player['current_song'].title
+        # Bersihkan judul dari informasi tambahan YouTube
+        clean_name = song_name.split(' (Official')[0].split(' | ')[0].split(' [Audio]')[0]
+        search_query = clean_name
+    else:
+        search_query = song_name
+    
+    # Kirim pesan status
+    status_msg = await ctx.send(f"🔍 Searching lyrics for **{search_query}**...")
+    
+    try:
+        # Cari lagu di Genius
+        song = await bot.loop.run_in_executor(
+            None,
+            lambda: genius.search_song(search_query)
+        )
+        
+        if not song:
+            await status_msg.edit(content=f"❌ No lyrics found for **{search_query}**")
+            return
+        
+        # Format lyrics agar tidak terlalu panjang untuk Discord
+        lyrics_text = song.lyrics
+        
+        # Jika lyrics terlalu panjang, split menjadi beberapa embed
+        if len(lyrics_text) > 2000:
+            # Untuk lyrics panjang, kirim sebagai file
+            filename = f"lyrics_{song.title.replace(' ', '_')}.txt"
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(f"Lyrics for: {song.title}\n")
+                f.write(f"Artist: {song.artist}\n")
+                f.write("="*50 + "\n\n")
+                f.write(lyrics_text)
+            
+            await status_msg.delete()
+            await ctx.send(
+                f"📝 **{song.title}** by **{song.artist}**",
+                file=discord.File(filename)
+            )
+            
+            # Hapus file temporary
+            import os
+            os.remove(filename)
+            
+        else:
+            # Untuk lyrics pendek, kirim sebagai embed
+            embed = discord.Embed(
+                title=f"🎵 {song.title}",
+                description=f"by **{song.artist}**",
+                color=0x00ff00
+            )
+            embed.add_field(
+                name="Lyrics",
+                value=lyrics_text[:1020] + "..." if len(lyrics_text) > 1020 else lyrics_text,
+                inline=False
+            )
+            
+            # Check if album art exists before adding to embed
+            if hasattr(song, 'album_art') and song.album_art:
+                embed.set_thumbnail(url=song.album_art)
+            
+            await status_msg.delete()
+            await ctx.send(embed=embed)
+            
+    except Exception as e:
+        await status_msg.edit(content=f"❌ Error fetching lyrics: {str(e)}")
+
 
 @bot.command(aliases=['h', 'commands'])
 async def help(ctx, category: str = None):
