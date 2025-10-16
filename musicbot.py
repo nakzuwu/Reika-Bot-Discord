@@ -9,7 +9,7 @@ from datetime import datetime,  timedelta, timezone
 from discord import File
 import asyncio
 from collections import deque
-from config import BOT_TOKEN, PREFIX
+from config import BOT_TOKEN, PREFIX, GENIUS_API_KEY
 import time
 import moviepy as mp
 import lyricsgenius
@@ -18,7 +18,6 @@ from PIL import Image
 # Suppress noise
 # youtube_dl.utils.bug_reports_message = lambda: ''
 
-GENIUS_API_KEY = "OR8FVnzUuaZ5fTny2Ni9nLuYjO0_JuAXrYQstoxegePX2dBehj-vXMKKLkDu5iNY"
 
 if GENIUS_API_KEY:
     genius = lyricsgenius.Genius(GENIUS_API_KEY)
