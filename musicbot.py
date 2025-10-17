@@ -1,33 +1,55 @@
 import discord
-import os, random, json, datetime
+import os
+import random
+import json
+import datetime
 import requests
 import re
 import aiohttp
-from discord.ext import commands
-import yt_dlp as youtube_dl
-from datetime import datetime,  timedelta, timezone
-from discord import File
 import asyncio
+import time
+from discord.ext import commands
+from discord import File
+from datetime import datetime, timedelta, timezone
 from collections import deque
 from config import BOT_TOKEN, PREFIX, GENIUS_API_KEY
-import time
-import moviepy as mp
-import lyricsgenius
-from PIL import Image
 
-# Suppress noise
-# youtube_dl.utils.bug_reports_message = lambda: ''
+# Third-party imports dengan error handling
+try:
+    import yt_dlp as youtube_dl
+    YTDL_AVAILABLE = True
+except ImportError:
+    print("❌ yt-dlp tidak terinstall. Fitur music tidak akan bekerja.")
+    YTDL_AVAILABLE = False
 
-
-if GENIUS_API_KEY:
-    genius = lyricsgenius.Genius(GENIUS_API_KEY)
-    # Optional: Configure genius
-    genius.verbose = False  # Non-aktifkan verbose output
-    genius.remove_section_headers = True  # Hapus section headers seperti [Chorus]
-    genius.skip_non_songs = True  # Skip non-songs
-else:
+try:
+    import lyricsgenius
+    if GENIUS_API_KEY:
+        genius = lyricsgenius.Genius(GENIUS_API_KEY)
+        genius.verbose = False
+        genius.remove_section_headers = True
+        genius.skip_non_songs = True
+        print("✅ Genius API configured successfully!")
+    else:
+        genius = None
+        print("⚠️  Genius API key not set. Lyrics feature will be disabled.")
+except ImportError:
     genius = None
-    print("⚠️  Genius API key not set. Lyrics feature will be disabled.")
+    print("⚠️  lyricsgenius not installed. Lyrics feature disabled.")
+
+try:
+    from PIL import Image, ImageEnhance, ImageOps
+    PIL_AVAILABLE = True
+except ImportError:
+    print("⚠️  PIL/Pillow not installed. GIF conversion disabled.")
+    PIL_AVAILABLE = False
+
+try:
+    import moviepy.editor as mp
+    MOVIEPY_AVAILABLE = True
+except ImportError:
+    print("⚠️  moviepy not installed. Video to GIF conversion disabled.")
+    MOVIEPY_AVAILABLE = False
 
 # ============================
 # CONFIGURATION & CONSTANTS
@@ -58,9 +80,6 @@ ffmpeg_options = {
     'options': '-vn',
 }
 
-# Global instances
-ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
-
 # ============================
 # DATA MODELS
 # ============================
@@ -76,13 +95,18 @@ class Song:
         self.requester = requester
 
     def format_duration(self):
+        if self.duration == 0:
+            return "Live"
         minutes, seconds = divmod(self.duration, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
         return f"{minutes}:{seconds:02d}"
 
-        
+
 class MusicPlayer:
     def __init__(self):
-        self.players = {}  # {guild_id: Player}
+        self.players = {}
         self.default_volume = 0.5
     
     def get_player(self, guild_id):
@@ -93,50 +117,29 @@ class MusicPlayer:
                 'volume': self.default_volume,
                 'loop': False,
                 'loop_queue': False,
-                'playlist_mode': False
+                'playlist_mode': False,
+                'is_playing': False,  # Track playback state
+                'skip_requested': False,  # Track skip requests
             }
         return self.players[guild_id]
     
-    def __getattr__(self, name):
-        # Fallback untuk backward compatibility sementara
-        if name in ['queue', 'current_song', 'volume', 'loop', 'loop_queue', 'playlist_mode']:
-            return None
-        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+    def clear_guild(self, guild_id):
+        """Clear player for specific guild"""
+        if guild_id in self.players:
+            self.players[guild_id] = {
+                'queue': [],
+                'current_song': None,
+                'volume': self.default_volume,
+                'loop': False,
+                'loop_queue': False,
+                'playlist_mode': False
+            }
 
 player = MusicPlayer()
-
-# Helper functions untuk mengakses player dengan guild_id
-def get_guild_player(ctx):
-    return player.get_player(ctx.guild.id)
-
-async def play_next(ctx):
-    guild_player = get_guild_player(ctx)
-    voice_client = ctx.voice_client
-    
-    if not voice_client:
-        return
-    
-    if guild_player['loop'] and guild_player['current_song']:
-        # Loop current song
-        await play_song(voice_client, guild_player['current_song'])
-        return
-    
-    if guild_player['queue']:
-        next_song = guild_player['queue'].pop(0)
-        guild_player['current_song'] = next_song
-        await play_song(voice_client, next_song)
-        
-        # Jika loop queue, tambahkan kembali ke akhir queue
-        if guild_player['loop_queue']:
-            guild_player['queue'].append(next_song)
-    else:
-        guild_player['current_song'] = None
 
 # ============================
 # BOT SETUP
 # ============================
-
-player = MusicPlayer()
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -150,44 +153,48 @@ bot = commands.Bot(
 )
 
 # ============================
+# HELPER FUNCTIONS
+# ============================
+
+def get_guild_player(ctx):
+    """Get guild-specific player"""
+    return player.get_player(ctx.guild.id)
+
+def get_guild_player_by_id(guild_id):
+    """Get player by guild_id directly"""
+    return player.get_player(guild_id)
+
+async def get_context_from_guild(guild_id):
+    """Create a minimal context from guild_id"""
+    guild = bot.get_guild(guild_id)
+    if guild and guild.text_channels:
+        channel = guild.text_channels[0]
+        class SimpleContext:
+            def __init__(self, guild, channel):
+                self.guild = guild
+                self.channel = channel
+                self.voice_client = guild.voice_client
+        return SimpleContext(guild, channel)
+    return None
+
+# ============================
 # MUSIC CORE FUNCTIONS
 # ============================
 
-def after_playing(error):
-    if error:
-        print(f'Player error: {error}')
-    
-    if not bot.voice_clients:
+async def play_song(voice_client, song):
+    """Play a song in voice channel dengan state management"""
+    if not YTDL_AVAILABLE:
         return
     
-    voice_client = bot.voice_clients[0]
+    guild_id = voice_client.guild.id
+    guild_player = get_guild_player_by_id(guild_id)
     
-    if player.loop and player.current_song:
-        coro = play_song(voice_client, player.current_song)
-    elif player.loop_queue and player.queue and player.current_song:
-        player.queue.append(player.current_song)
-        next_song = player.queue.popleft()
-        coro = play_song(voice_client, next_song)
-    elif player.queue:
-        next_song = player.queue.popleft()
-        coro = play_song(voice_client, next_song)
-    else:
-        player.current_song = None
-        coro = voice_client.disconnect()
-    
-    asyncio.run_coroutine_threadsafe(coro, bot.loop)
-
-async def play_song(voice_client, song):
-    """Play a song in voice channel"""
     try:
-        # Dapatkan guild_id dari context yang berbeda
-        if hasattr(voice_client, 'guild'):
-            guild_id = voice_client.guild.id
-        else:
-            # Fallback: cari guild dari channel
-            guild_id = voice_client.channel.guild.id
-            
-        guild_player = get_guild_player_by_id(guild_id)
+        # Update state
+        guild_player['is_playing'] = True
+        guild_player['skip_requested'] = False
+        
+        print(f"🎵 Preparing to play: {song.title}")
         
         with youtube_dl.YoutubeDL(ytdl_format_options) as ytdl:
             data = await bot.loop.run_in_executor(
@@ -195,45 +202,48 @@ async def play_song(voice_client, song):
                 lambda: ytdl.extract_info(song.url, download=False)
             )
             
-            if 'url' in data:
-                audio_url = data['url']
-            else:
-                # Fallback untuk format yang berbeda
-                formats = data.get('formats', [])
-                audio_format = next((f for f in formats if f.get('acodec') != 'none' and not f.get('filesize')), None)
-                if audio_format:
-                    audio_url = audio_format['url']
-                else:
-                    raise Exception("No playable audio format found")
+            audio_url = data['url']
             
-            # Buat audio source dengan volume yang sesuai
             source = discord.FFmpegPCMAudio(
                 audio_url,
-                before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+                before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin',
                 options='-vn'
             )
             
             volume = guild_player['volume']
+            
+            def after_playing(error):
+                if error:
+                    print(f'Player error: {error}')
+                
+                # Update state
+                guild_player['is_playing'] = False
+                
+                # Only trigger next if skip wasn't requested
+                if not guild_player.get('skip_requested', False):
+                    print("🔄 AFTER_PLAYING - Triggering next song naturally")
+                    asyncio.run_coroutine_threadsafe(play_next_by_guild(guild_id), bot.loop)
+                else:
+                    print("🔄 AFTER_PLAYING - Skip was requested, not triggering next")
+                    guild_player['skip_requested'] = False
+            
             voice_client.play(
-                discord.PCMVolumeTransformer(source, volume=volume),
-                after=lambda e: asyncio.run_coroutine_threadsafe(
-                    play_next_by_guild(guild_id), 
-                    bot.loop
-                ) if e is None else print(f'Player error: {e}')
+                discord.PCMVolumeTransformer(source, volume=volume), 
+                after=after_playing
             )
+            
+            guild_player['current_song'] = song
+            print(f"✅ Now playing: {song.title}")
             
     except Exception as e:
         print(f"Error playing song: {e}")
-        # Coba play next song jika error
-        asyncio.run_coroutine_threadsafe(
-            play_next_by_guild(guild_id), 
-            bot.loop
-        )
+        guild_player['is_playing'] = False
+        guild_player['skip_requested'] = False
+        await asyncio.sleep(1)
+        asyncio.run_coroutine_threadsafe(play_next_by_guild(guild_id), bot.loop)
 
-# Helper function untuk play_next dengan guild_id
 async def play_next_by_guild(guild_id):
-    """Play next song for specific guild"""
-    # Cari voice_client berdasarkan guild_id
+    """Play next song for specific guild - FIXED VERSION"""
     for voice_client in bot.voice_clients:
         if voice_client.guild.id == guild_id:
             ctx = await get_context_from_guild(guild_id)
@@ -241,46 +251,54 @@ async def play_next_by_guild(guild_id):
                 await play_next(ctx)
             break
 
-async def get_context_from_guild(guild_id):
-    """Create a minimal context from guild_id"""
-    guild = bot.get_guild(guild_id)
-    if guild and guild.text_channels:
-        # Use first text channel as fallback context
-        channel = guild.text_channels[0]
-        # Create minimal context-like object
-        class SimpleContext:
-            def __init__(self, guild, channel):
-                self.guild = guild
-                self.channel = channel
-        return SimpleContext(guild, channel)
-    return None
-
-def get_guild_player_by_id(guild_id):
-    """Get player by guild_id directly"""
-    return player.get_player(guild_id)
-
-async def process_playlist(url, requester):
-    """Extract all songs from a playlist"""
-    ytdl_playlist = youtube_dl.YoutubeDL({
-        **ytdl_format_options,
-        'extract_flat': 'in_playlist',
-        'noplaylist': False
-    })
+async def play_next(ctx):
+    """Play next song in queue dengan state management"""
+    guild_player = get_guild_player(ctx)
+    voice_client = ctx.voice_client
     
-    try:
-        data = await bot.loop.run_in_executor(None, ytdl_playlist.extract_info(url, download=False))
-        if not data or 'entries' not in data:
-            return None
+    if not voice_client:
+        print("❌ PLAY_NEXT - No voice client")
+        return
+    
+    # Jika sedang dalam proses skip, jangan lanjutkan
+    if guild_player.get('skip_requested', False):
+        print("⚠️ PLAY_NEXT - Skip in progress, aborting")
+        return
+    
+    print(f"🎵 PLAY_NEXT - Current: {guild_player['current_song'].title if guild_player['current_song'] else 'None'}")
+    print(f"🎵 PLAY_NEXT - Queue: {len(guild_player['queue'])} songs")
+    
+    if guild_player['loop'] and guild_player['current_song']:
+        # Loop current song
+        print(f"🎵 PLAY_NEXT - Looping: {guild_player['current_song'].title}")
+        await play_song(voice_client, guild_player['current_song'])
         
-        return [Song(entry, requester) for entry in data['entries'] if entry]
-    except Exception as e:
-        print(f"Playlist error: {e}")
-        return None
-
+    elif guild_player['queue']:
+        # Play next song in queue
+        next_song = guild_player['queue'].pop(0)
+        print(f"🎵 PLAY_NEXT - Playing: {next_song.title}")
+        await play_song(voice_client, next_song)
+        
+        # Jika loop queue, tambahkan kembali ke akhir queue
+        if guild_player['loop_queue']:
+            guild_player['queue'].append(next_song)
+            print(f"🎵 PLAY_NEXT - Queue loop: added {next_song.title}")
+            
+    else:
+        # No more songs
+        guild_player['current_song'] = None
+        print("🎵 PLAY_NEXT - Queue empty")
+        
 # ============================
 # MEDIA DOWNLOAD FUNCTIONS
 # ============================
+
 async def download_media(ctx, url, mode):
+    """Download media from various platforms"""
+    if not YTDL_AVAILABLE:
+        await ctx.send("❌ yt-dlp not available. Download features disabled.")
+        return
+
     await ctx.send("⏳ Sedang memproses permintaanmu...")
 
     ydl_opts = {
@@ -290,7 +308,6 @@ async def download_media(ctx, url, mode):
         'no_warnings': True,
     }
 
-    # Format untuk setiap mode - support YouTube Music
     if mode == 'yt':
         ydl_opts.update({
             'format': 'best[height<=480]/best[ext=mp4]',
@@ -302,36 +319,27 @@ async def download_media(ctx, url, mode):
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '192',  # Increase quality for music
+                'preferredquality': '192',
             }]
         })
-    elif mode == 'fb':
+    elif mode in ['fb', 'ig']:
         ydl_opts.update({
             'format': 'best[ext=mp4]/best',
             'merge_output_format': 'mp4'
         })
-    elif mode == 'ig':
-        ydl_opts.update({
-            'format': 'best[ext=mp4]/best', 
-            'merge_output_format': 'mp4'
-        })
     else:
-        return await ctx.send("🚫 Mode tidak dikenal. Gunakan: `yt`, `ytmp3`, `fb`, atau `ig`.")
+        await ctx.send("🚫 Mode tidak dikenal. Gunakan: `yt`, `ytmp3`, `fb`, atau `ig`.")
+        return
 
     try:
         loop = asyncio.get_event_loop()
         ydl = youtube_dl.YoutubeDL(ydl_opts)
         
-        # Extract info untuk mendapatkan metadata
         info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
-        
-        # Cek jika ini dari YouTube Music
         is_music = 'music.youtube.com' in url.lower() or info.get('extractor') == 'youtube:tab'
         
-        # Download file
         await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
         
-        # Tentukan nama file berdasarkan mode
         if mode == 'ytmp3':
             filename = os.path.join(DOWNLOADS_PATH, 'temp_download.mp3')
             file_extension = 'mp3'
@@ -340,19 +348,17 @@ async def download_media(ctx, url, mode):
             file_extension = 'mp4'
 
         if not os.path.exists(filename):
-            return await ctx.send("❌ File hasil unduhan tidak ditemukan.")
+            await ctx.send("❌ File hasil unduhan tidak ditemukan.")
+            return
 
-        # Siapkan metadata untuk embed
         title = info.get('title', 'Unknown Title')
         webpage_url = info.get('webpage_url', url)
         thumbnail = info.get('thumbnail')
         
-        # Untuk YouTube Music, tambahkan info artist jika ada
         description = f"**[{title}]({webpage_url})**"
         if is_music and info.get('artist'):
             description = f"**🎵 {title}**\n👤 **Artist:** {info.get('artist')}\n🔗 {webpage_url}"
         
-        # Kirim hasilnya
         safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
         file = discord.File(filename, filename=f"{safe_title[:50]}.{file_extension}")
         
@@ -369,7 +375,6 @@ async def download_media(ctx, url, mode):
         if thumbnail:
             embed.set_thumbnail(url=thumbnail)
             
-        # Tambahkan info durasi untuk musik
         if is_music and info.get('duration'):
             duration = info.get('duration')
             minutes, seconds = divmod(duration, 60)
@@ -384,26 +389,104 @@ async def download_media(ctx, url, mode):
         await ctx.send(f"❌ Terjadi error: `{e}`")
 
     finally:
-        # Bersihkan file
         try:
             if 'filename' in locals() and os.path.exists(filename):
                 os.remove(filename)
         except:
             pass
+
+# ============================
+# GIF CONVERSION FUNCTIONS
+# ============================
+
+async def convert_image_to_gif_fixed(input_path, output_path):
+    """Convert image to GIF dengan teknik darken white"""
+    if not PIL_AVAILABLE:
+        raise Exception("PIL/Pillow not available")
+    
+    with Image.open(input_path) as img:
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        img_data = img.getdata()
+        new_data = []
+        
+        for pixel in img_data:
+            r, g, b = pixel
+            if r > 240 and g > 240 and b > 240:
+                r = max(200, r - 5)
+                g = max(200, g - 5)
+                b = max(200, b - 5)
+            new_data.append((r, g, b))
+        
+        img.putdata(new_data)
+        img_rgba = img.convert('RGBA')
+        
+        width, height = img_rgba.size
+        if width > 0 and height > 0:
+            img_rgba.putpixel((0, 0), (0, 0, 0, 0))
+        
+        img_rgba.save(output_path, format='GIF', transparency=0, optimize=True)
+
+async def convert_video_to_gif_fixed(input_path, output_path):
+    """Convert video to GIF"""
+    if not MOVIEPY_AVAILABLE:
+        await convert_video_simple_ffmpeg(input_path, output_path)
+        return
+    
+    try:
+        clip = mp.VideoFileClip(input_path)
+        max_duration = 5
+        
+        if clip.duration > max_duration:
+            clip = clip.subclip(0, max_duration)
+        
+        target_width = 320
+        if clip.w > target_width:
+            clip = clip.resize(width=target_width)
+        
+        fps = min(8, clip.fps)
+        
+        clip.write_gif(
+            output_path,
+            fps=fps,
+            program='ffmpeg',
+            tempfiles=True,
+            logger=None
+        )
+        
+        clip.close()
+        
+    except Exception as e:
+        await convert_video_simple_ffmpeg(input_path, output_path)
+
+async def convert_video_simple_ffmpeg(input_path, output_path):
+    """Simple video to GIF menggunakan ffmpeg"""
+    import subprocess
+    
+    try:
+        cmd_convert = [
+            'ffmpeg', '-i', input_path,
+            '-t', '5',
+            '-vf', 'fps=8,scale=320:-1',
+            '-y', output_path
+        ]
+        
+        result = subprocess.run(cmd_convert, capture_output=True, timeout=30)
+        if result.returncode != 0:
+            raise Exception(f"FFmpeg failed with return code {result.returncode}")
+        
+    except subprocess.TimeoutExpired:
+        raise Exception("FFmpeg timeout")
+    except Exception as e:
+        raise Exception(f"Video conversion error: {str(e)}")
+
 # ============================
 # WAIFU SYSTEM FUNCTIONS
 # ============================
 
-CLAIM_FILE = "claims.json"
-WAIFU_FOLDER = "images/waifu"
-
-# Pastikan folder dan file data ada
-os.makedirs(WAIFU_FOLDER, exist_ok=True)
-if not os.path.exists(CLAIM_FILE):
-    with open(CLAIM_FILE, "w") as f:
-        json.dump({}, f, indent=4)
-
 async def handle_waifu_claim(ctx):
+    """Handle daily waifu claiming"""
     waifu_folder = "./images/waifu"
     claim_file = "claimed_waifus.json"
 
@@ -415,7 +498,6 @@ async def handle_waifu_claim(ctx):
         with open(claim_file, "w") as f:
             json.dump({}, f)
 
-    # Load data lama supaya tidak hilang
     try:
         with open(claim_file, "r") as f:
             content = f.read().strip()
@@ -426,7 +508,6 @@ async def handle_waifu_claim(ctx):
     user_id = str(ctx.author.id)
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # Cek claim hari ini
     if user_id in data and data[user_id].get("date") == today:
         waifu_name = data[user_id]["waifu"]
         await ctx.send(f"💤 Kamu sudah claim hari ini, bebebmu tetap **{waifu_name}**~ 💕")
@@ -440,7 +521,6 @@ async def handle_waifu_claim(ctx):
     chosen = random.choice(waifus)
     waifu_name = os.path.splitext(chosen)[0].replace("_", " ").title()
 
-    # Simpan tanpa hapus data lain
     old_data = data.get(user_id, {})
     old_count = old_data.get("count", 0)
 
@@ -461,13 +541,13 @@ async def handle_waifu_claim(ctx):
         await ctx.send(f"⚠️ Gambar **{waifu_name}** terlalu besar untuk dikirim.")
 
 async def get_top_karbit(ctx):
+    """Show waifu claim leaderboard"""
     claim_file = "claimed_waifus.json"
 
     if not os.path.exists(claim_file):
         await ctx.send("📂 Belum ada data claim.")
         return
 
-    # Load data
     try:
         with open(claim_file, "r") as f:
             content = f.read().strip()
@@ -479,7 +559,6 @@ async def get_top_karbit(ctx):
         await ctx.send("📭 Belum ada yang claim waifu.")
         return
 
-    # Hitung leaderboard berdasarkan count
     leaderboard = []
     for user_id, info in data.items():
         count = info.get("count", 0)
@@ -489,8 +568,11 @@ async def get_top_karbit(ctx):
 
     desc = ""
     for i, (user_id, count) in enumerate(leaderboard[:10], start=1):
-        user = await ctx.bot.fetch_user(int(user_id))
-        desc += f"**{i}.** {user.name} — ❤️ {count}x claim\n"
+        try:
+            user = await ctx.bot.fetch_user(int(user_id))
+            desc += f"**{i}.** {user.name} — ❤️ {count}x claim\n"
+        except:
+            desc += f"**{i}.** Unknown User — ❤️ {count}x claim\n"
 
     embed = discord.Embed(
         title="🏆 Top Karbit Leaderboard",
@@ -504,33 +586,105 @@ async def get_top_karbit(ctx):
 # BOT EVENTS
 # ============================
 
+@bot.event
+async def on_ready():
+    """Bot startup handler"""
+    print(f'✅ Logged in as {bot.user} (ID: {bot.user.id})')
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="n.help"))
+    
+    # Load MALCommands cog
+    try:
+        await bot.add_cog(MALCommands(bot))
+        print("✅ MALCommands cog loaded successfully!")
+    except Exception as e:
+        print(f"❌ Failed to load MALCommands cog: {e}")
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    # Auto-disconnect if alone in voice channel
-    if member == bot.user and not after.channel:
-        player.clear()
-        player.current_song = None
+    """Auto-disconnect jika sendirian di voice channel"""
+    try:
+        # Case 1: Bot sendiri yang disconnect
+        if member == bot.user and not after.channel:
+            if before.channel:
+                guild_id = before.channel.guild.id
+                player.clear_guild(guild_id)
     
-    if member != bot.user and before.channel and not after.channel:
-        voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
-        if voice_client and voice_client.channel == before.channel:
-            if len(voice_client.channel.members) == 1:  # Only bot remains
-                await voice_client.disconnect()
-                player.clear()
-                player.current_song = None
+        # Case 2: Member lain keluar dari channel
+        if member != bot.user and before.channel and not after.channel:
+            voice_client = discord.utils.get(bot.voice_clients, guild=member.guild)
+            if voice_client and voice_client.channel == before.channel:
+                if len(voice_client.channel.members) == 1:
+                    guild_id = member.guild.id
+                    player.clear_guild(guild_id)
+                    
+                    if voice_client.is_playing() or voice_client.is_paused():
+                        voice_client.stop()
+                    
+                    await asyncio.sleep(1)
+                    await voice_client.disconnect()
+                    
+    except Exception as e:
+        print(f"Voice state update error: {e}")
+
+@bot.event
+async def on_message(message):
+    """Handle auto-replies and command processing"""
+    if message.author.bot:
+        return
+
+    # Process bans first
+    cleanup_expired_timeouts()
+    data = load_bans()
+    if str(message.author.id) in data:
+        await bot.process_commands(message)
+        return
+
+    content = message.content.lower()
+    
+    replies = {
+        "jawa": "jawa lagi, jawa lagi",
+        "nkj karbit": "maaf, nkj tidak karbit",
+        "my kisah": "karbitnyooo",
+        "bukankah ini": "bukan",
+        "samsul": "habis bensin",
+        "nkj anjeng": "you're done lil bro\n\nIP. 92.28.211.23\nN: 43.7462\nW: 12.4893 SS Number: 6979191519182043\nIPv6: fe80:5dcd.:ef69:fb22::d9 \nUPP: Enabled DMZ: 10.112.42\nMAC: 5A:78:3:7E:00\nDNS: 8.8.8.8\nALT DNS: 1.1.1.8.1\nDNS SUFFIX: Dink WAN: 100.236\nGATEWAY: 192.168\nUDP OPEN PORT: 8080.80",
+        "dika": "dika anjeng",
+        "osu": "yah ada osu, bete gw njing",
+        "help me reika": "In case of an investigation by any federal entity or similar, I do not have any involvement with this group or with the people in it, I do not know how I am here, probably added by a third party, I do not support any actions by members of this group.",
+        "lala": "Bete njing ada lala",
+        "bedwar": "bising bodo aku nak tido",
+        "my bebeb": "karbit bgt njeng",
+        "reika": "ap sh manggil manggil, nanti bebeb nkj marah lho",
+        "saran lagu": "https://youtu.be/wQu64bXbncI?si=ZM4srvzDHEDo6Oqx",
+        "kimi thread": "‼Kimi Thread ‼\nThis is going to be a thread on Kimi (also known as SakudaPikora, MrMolvanstress) and his inappropriate behavior with minors. As well as allowing minors into his discord server that is based off of his YouTube channel (which is very sexual in nature). I'm censoring the name of all minors to avoid exposing them to undesirables"    
+    }
+    
+    for k, v in replies.items():
+        if k in content:
+            await message.channel.send(v)
+            break
+
+    await bot.process_commands(message)
 
 # ============================
 # MUSIC COMMANDS
 # ============================
+
 @bot.command(aliases=['p'])
 async def play(ctx, *, query):
+    """Play a song or add to queue"""
+    if not YTDL_AVAILABLE:
+        await ctx.send("❌ Music features are currently unavailable.")
+        return
+
     if not ctx.author.voice:
-        return await ctx.send("🚫 You need to be in a voice channel!")
+        await ctx.send("🚫 You need to be in a voice channel!")
+        return
 
     clean_query = query.strip()
     if not clean_query:
-        return await ctx.send("🚫 Please provide a song name or URL")
+        await ctx.send("🚫 Please provide a song name or URL")
+        return
 
     voice_client = ctx.voice_client
     if not voice_client:
@@ -538,7 +692,8 @@ async def play(ctx, *, query):
             await ctx.author.voice.channel.connect()
             await ctx.send("✅ Connected to voice channel! 🎶")
         except Exception as e:
-            return await ctx.send(f"❌ Failed to connect to voice channel: {e}")
+            await ctx.send(f"❌ Failed to connect to voice channel: {e}")
+            return
 
     status_msg = await ctx.send("🎧 Searching for the song, please wait...")
     guild_player = get_guild_player(ctx)
@@ -546,6 +701,7 @@ async def play(ctx, *, query):
     async with ctx.typing():
         try:
             if 'list=' in clean_query.lower() and ('youtube.com' in clean_query.lower() or 'youtu.be' in clean_query.lower()):
+                # Playlist handling
                 try:
                     ytdl_playlist = youtube_dl.YoutubeDL({
                         **ytdl_format_options,
@@ -573,13 +729,11 @@ async def play(ctx, *, query):
                         await status_msg.edit(content="❌ No valid songs found in playlist")
                         return
 
-                    # Tambah ke queue guild-specific
                     guild_player['playlist_mode'] = True
                     for song in songs:
                         guild_player['queue'].append(song)
                     guild_player['playlist_mode'] = False
 
-                    # Mainkan jika belum main
                     if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
                         await play_next(ctx)
 
@@ -589,6 +743,7 @@ async def play(ctx, *, query):
                     await status_msg.edit(content=f"❌ Playlist error: {str(e)}")
 
             else:
+                # Single song handling
                 try:
                     with youtube_dl.YoutubeDL(ytdl_format_options) as ytdl_instance:
                         if clean_query.startswith(('http://', 'https://')):
@@ -614,7 +769,6 @@ async def play(ctx, *, query):
 
                         song = Song(data, ctx.author)
 
-                        # Tambahkan ke antrian guild-specific
                         if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
                             guild_player['queue'].append(song)
                             embed = discord.Embed(
@@ -643,10 +797,12 @@ async def play(ctx, *, query):
 
 @bot.command(aliases=['q'])
 async def queue(ctx, page: int = 1):
+    """Show current queue"""
     guild_player = get_guild_player(ctx)
     
     if not guild_player['queue'] and not guild_player['current_song']:
-        return await ctx.send("ℹ️ The queue is empty!")
+        await ctx.send("ℹ️ The queue is empty!")
+        return
 
     items_per_page = 5
     pages = max(1, (len(guild_player['queue']) + items_per_page - 1) // items_per_page)
@@ -705,22 +861,69 @@ async def queue(ctx, page: int = 1):
 
     try:
         await ctx.send(embed=embed)
-    except discord.HTTPException as e:
+    except discord.HTTPException:
         simple_msg = f"Now Playing: {guild_player['current_song'].title if guild_player['current_song'] else 'Nothing'}\n"
-        simple_msg += f"Queue: {len(guild_player['queue'])} songs (use n.queue with page number to view)"
+        simple_msg += f"Queue: {len(guild_player['queue'])} songs"
         await ctx.send(simple_msg)
-
 
 @bot.command(aliases=['s'])
 async def skip(ctx):
-    if not ctx.voice_client or not ctx.voice_client.is_playing():
-        return await ctx.send("ℹ️ Nothing is currently playing!")
+    """Skip current song dengan state management"""
+    voice_client = ctx.voice_client
+    if not voice_client or not voice_client.is_playing():
+        await ctx.send("ℹ️ Nothing is currently playing!")
+        return
     
-    ctx.voice_client.stop()
-    await ctx.message.add_reaction("⏭️")
+    guild_player = get_guild_player(ctx)
+    
+    print(f"🔄 SKIP COMMAND - Current: {guild_player['current_song'].title if guild_player['current_song'] else 'None'}")
+    print(f"🔄 SKIP COMMAND - Queue: {[song.title for song in guild_player['queue']]}")
+    
+    # Set skip flag dan stop current playback
+    guild_player['skip_requested'] = True
+    voice_client.stop()
+    
+    # Tunggu untuk state update
+    await asyncio.sleep(0.5)
+    
+    # Tentukan next song berdasarkan kondisi
+    next_song = None
+    status_msg = ""
+    
+    if guild_player['loop'] and guild_player['current_song']:
+        # Loop current song
+        next_song = guild_player['current_song']
+        status_msg = "🔂 Looping current song"
+        print(f"🔄 SKIP - Looping: {next_song.title}")
+        
+    elif guild_player['queue']:
+        # Ambil next song dari queue
+        next_song = guild_player['queue'].pop(0)
+        status_msg = f"🎵 **{next_song.title}**"
+        print(f"🔄 SKIP - Playing next: {next_song.title}")
+        
+        # Jika loop queue, tambahkan current song ke akhir queue
+        if guild_player['loop_queue']:
+            guild_player['queue'].append(next_song)
+            print(f"🔄 SKIP - Added to queue loop: {next_song.title}")
+            
+    else:
+        # Queue kosong
+        guild_player['current_song'] = None
+        await ctx.send("⏭️ Skipped! 🎵 Queue is now empty.")
+        await ctx.message.add_reaction("⏭️")
+        print("🔄 SKIP - Queue empty")
+        return
+    
+    # Play the next song
+    if next_song:
+        await play_song(voice_client, next_song)
+        await ctx.send(f"⏭️ Skipped! Now playing: {status_msg}")
+        await ctx.message.add_reaction("⏭️")
 
 @bot.command()
 async def loop(ctx):
+    """Toggle loop for current song"""
     guild_player = get_guild_player(ctx)
     guild_player['loop'] = not guild_player['loop']
     guild_player['loop_queue'] = False if guild_player['loop'] else guild_player['loop_queue']
@@ -728,6 +931,7 @@ async def loop(ctx):
 
 @bot.command()
 async def loopqueue(ctx):
+    """Toggle queue looping"""
     guild_player = get_guild_player(ctx)
     guild_player['loop_queue'] = not guild_player['loop_queue']
     guild_player['loop'] = False if guild_player['loop_queue'] else guild_player['loop']
@@ -735,12 +939,15 @@ async def loopqueue(ctx):
 
 @bot.command(aliases=['rm'])
 async def remove(ctx, index: int):
+    """Remove a song from queue"""
     guild_player = get_guild_player(ctx)
     if not guild_player['queue']:
-        return await ctx.send("ℹ️ The queue is empty!")
+        await ctx.send("ℹ️ The queue is empty!")
+        return
     
     if index < 1 or index > len(guild_player['queue']):
-        return await ctx.send(f"🚫 Please provide a valid position (1-{len(guild_player['queue'])})")
+        await ctx.send(f"🚫 Please provide a valid position (1-{len(guild_player['queue'])})")
+        return
     
     removed = guild_player['queue'].pop(index - 1)
     embed = discord.Embed(
@@ -752,21 +959,26 @@ async def remove(ctx, index: int):
 
 @bot.command(aliases=['c'])
 async def clear(ctx):
+    """Clear the queue"""
     guild_player = get_guild_player(ctx)
     if not guild_player['queue']:
-        return await ctx.send("ℹ️ The queue is already empty!")
+        await ctx.send("ℹ️ The queue is already empty!")
+        return
     
     guild_player['queue'].clear()
     await ctx.message.add_reaction("🧹")
 
 @bot.command(aliases=['vol'])
 async def volume(ctx, volume: int = None):
+    """Set volume (0-100)"""
     guild_player = get_guild_player(ctx)
     if volume is None:
-        return await ctx.send(f"🔊 Current volume: {int(guild_player['volume'] * 100)}%")
+        await ctx.send(f"🔊 Current volume: {int(guild_player['volume'] * 100)}%")
+        return
     
     if volume < 0 or volume > 100:
-        return await ctx.send("🚫 Volume must be between 0 and 100")
+        await ctx.send("🚫 Volume must be between 0 and 100")
+        return
     
     guild_player['volume'] = volume / 100
     if ctx.voice_client and ctx.voice_client.source:
@@ -776,9 +988,11 @@ async def volume(ctx, volume: int = None):
 
 @bot.command()
 async def shuffle(ctx):
+    """Shuffle the queue"""
     guild_player = get_guild_player(ctx)
     if len(guild_player['queue']) < 2:
-        return await ctx.send("ℹ️ Need at least 2 songs in queue to shuffle!")
+        await ctx.send("ℹ️ Need at least 2 songs in queue to shuffle!")
+        return
     
     import random
     random.shuffle(guild_player['queue'])
@@ -786,18 +1000,22 @@ async def shuffle(ctx):
 
 @bot.command(aliases=['mv'])
 async def move(ctx, from_pos: int, to_pos: int):
+    """Move song in queue"""
     guild_player = get_guild_player(ctx)
     if len(guild_player['queue']) < 2:
-        return await ctx.send("ℹ️ Need at least 2 songs in queue to move!")
+        await ctx.send("ℹ️ Need at least 2 songs in queue to move!")
+        return
     
     if from_pos < 1 or from_pos > len(guild_player['queue']) or to_pos < 1 or to_pos > len(guild_player['queue']):
-        return await ctx.send(f"🚫 Invalid positions (1-{len(guild_player['queue'])})")
+        await ctx.send(f"🚫 Invalid positions (1-{len(guild_player['queue'])})")
+        return
     
     from_idx = from_pos - 1
     to_idx = to_pos - 1
     
     if from_idx == to_idx:
-        return await ctx.send("🚫 Positions are the same!")
+        await ctx.send("🚫 Positions are the same!")
+        return
     
     moved_song = guild_player['queue'].pop(from_idx)
     guild_player['queue'].insert(to_idx, moved_song)
@@ -811,28 +1029,25 @@ async def move(ctx, from_pos: int, to_pos: int):
 @bot.command(aliases=['l', 'lyric'])
 async def lyrics(ctx, *, song_name: str = None):
     """Get lyrics for current song or specified song"""
-    
     if not genius:
-        return await ctx.send("❌ Lyrics feature is not configured. Please set up Genius API key.")
+        await ctx.send("❌ Lyrics feature is not configured. Please set up Genius API key.")
+        return
     
-    # Jika tidak ada input, gunakan lagu yang sedang diputar
     if song_name is None:
         guild_player = get_guild_player(ctx)
         if not guild_player['current_song']:
-            return await ctx.send("❌ No song is currently playing! Please specify a song name.")
+            await ctx.send("❌ No song is currently playing! Please specify a song name.")
+            return
         
         song_name = guild_player['current_song'].title
-        # Bersihkan judul dari informasi tambahan YouTube
         clean_name = song_name.split(' (Official')[0].split(' | ')[0].split(' [Audio]')[0]
         search_query = clean_name
     else:
         search_query = song_name
     
-    # Kirim pesan status
     status_msg = await ctx.send(f"🔍 Searching lyrics for **{search_query}**...")
     
     try:
-        # Cari lagu di Genius
         song = await bot.loop.run_in_executor(
             None,
             lambda: genius.search_song(search_query)
@@ -842,12 +1057,9 @@ async def lyrics(ctx, *, song_name: str = None):
             await status_msg.edit(content=f"❌ No lyrics found for **{search_query}**")
             return
         
-        # Format lyrics agar tidak terlalu panjang untuk Discord
         lyrics_text = song.lyrics
         
-        # Jika lyrics terlalu panjang, split menjadi beberapa embed
         if len(lyrics_text) > 2000:
-            # Untuk lyrics panjang, kirim sebagai file
             filename = f"lyrics_{song.title.replace(' ', '_')}.txt"
             with open(filename, 'w', encoding='utf-8') as f:
                 f.write(f"Lyrics for: {song.title}\n")
@@ -861,12 +1073,8 @@ async def lyrics(ctx, *, song_name: str = None):
                 file=discord.File(filename)
             )
             
-            # Hapus file temporary
-            import os
             os.remove(filename)
-            
         else:
-            # Untuk lyrics pendek, kirim sebagai embed
             embed = discord.Embed(
                 title=f"🎵 {song.title}",
                 description=f"by **{song.artist}**",
@@ -878,7 +1086,6 @@ async def lyrics(ctx, *, song_name: str = None):
                 inline=False
             )
             
-            # Check if album art exists before adding to embed
             if hasattr(song, 'album_art') and song.album_art:
                 embed.set_thumbnail(url=song.album_art)
             
@@ -892,39 +1099,423 @@ async def lyrics(ctx, *, song_name: str = None):
 async def stop(ctx):
     """Stop playback and disconnect"""
     if not ctx.voice_client:
-        return await ctx.send("ℹ️ I'm not in a voice channel!")
+        await ctx.send("ℹ️ I'm not in a voice channel!")
+        return
     
-    # Dapatkan guild player
     guild_player = get_guild_player(ctx)
+    guild_id = ctx.guild.id
     
-    # Clear queue dan reset state untuk guild ini
     guild_player['queue'].clear()
     guild_player['current_song'] = None
     guild_player['loop'] = False
     guild_player['loop_queue'] = False
     
-    # Stop playback dan disconnect
     if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
         ctx.voice_client.stop()
     
     await ctx.voice_client.disconnect()
+    player.clear_guild(guild_id)
     await ctx.message.add_reaction("🛑")
-    
-    guild_id = ctx.guild.id
-    if guild_id in player.players:
-        del player.players[guild_id]
+
+# ============================
+# MEDIA DOWNLOAD COMMANDS
+# ============================
+
+@bot.command()
+async def yt(ctx, url: str):
+    """Download video dari YouTube"""
+    await download_media(ctx, url, 'yt')
+
+@bot.command()
+async def ytmp3(ctx, url: str):
+    """Download audio (MP3) dari YouTube"""
+    await download_media(ctx, url, 'ytmp3')
+
+@bot.command()
+async def fb(ctx, url: str):
+    """Download video dari Facebook"""
+    await download_media(ctx, url, 'fb')
+
+@bot.command()
+async def ig(ctx, url: str):
+    """Download video dari Instagram"""
+    await download_media(ctx, url, 'ig')
+
+@bot.command(name="ytthumbnail")
+async def ytthumbnail(ctx, url: str = None):
+    """Get YouTube video thumbnail"""
+    if url is None:
+        await ctx.send("📺 Gunakan command seperti ini:\n`n.ytthumbnail <link_youtube>`")
+        return
+
+    pattern = r"(?:v=|youtu\.be/|embed/)([a-zA-Z0-9_-]{11})"
+    match = re.search(pattern, url)
+
+    if not match:
+        await ctx.send("⚠️ Tidak bisa menemukan ID video YouTube dari link itu.")
+        return
+
+    video_id = match.group(1)
+    resolutions = [
+        f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
+        f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
+        f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg"
+    ]
+
+    thumbnail_url = None
+    async with aiohttp.ClientSession() as session:
+        for res_url in resolutions:
+            async with session.get(res_url) as resp:
+                if resp.status == 200:
+                    thumbnail_url = res_url
+                    break
+
+    if thumbnail_url is None:
+        await ctx.send("😔 Tidak bisa menemukan thumbnail untuk video tersebut.")
+        return
+
+    embed = discord.Embed(
+        title="🎬 YouTube Thumbnail",
+        description=f"Thumbnail dari: {url}",
+        color=discord.Color.red()
+    )
+    embed.set_image(url=thumbnail_url)
+    embed.set_footer(text="Requested by " + ctx.author.name)
+
+    await ctx.send(embed=embed)
+    await ctx.send(f"🖼️ **Link download langsung:** {thumbnail_url}")
+
+@bot.command(name="twitter")
+async def download_twitter(ctx, url: str):
+    """Download video dari Twitter (X)"""
+    await ctx.send("🐦 Sedang memproses video Twitter...")
+
+    temp_filename = os.path.join(DOWNLOADS_PATH, "twitter_video.mp4")
+
+    if os.path.exists(temp_filename):
+        os.remove(temp_filename)
+
+    ydl_opts = {
+        "outtmpl": temp_filename,
+        "format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "merge_output_format": "mp4",
+    }
+
+    try:
+        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        file_size = os.path.getsize(temp_filename)
+        limit_bytes = 25 * 1024 * 1024
+
+        if file_size <= limit_bytes:
+            await ctx.send("✅ Video berhasil diunduh!", file=File(temp_filename))
+        else:
+            await ctx.send("⚠️ File terlalu besar, sedang diupload ke GoFile.io...")
+
+            server_info = requests.get("https://api.gofile.io/getServer").json()
+            if server_info["status"] != "ok":
+                await ctx.send("❌ Gagal ambil server GoFile.io.")
+                return
+
+            server = server_info["data"]["server"]
+
+            with open(temp_filename, "rb") as f:
+                response = requests.post(
+                    f"https://{server}.gofile.io/uploadFile",
+                    files={"file": f}
+                ).json()
+
+            if response["status"] == "ok":
+                download_link = response["data"]["downloadPage"]
+                await ctx.send(f"📦 Video terlalu besar, tapi sudah diupload!\n🔗 {download_link}")
+            else:
+                await ctx.send("❌ Gagal mengupload video ke GoFile.io.")
+
+    except Exception as e:
+        await ctx.send(f"❌ Gagal mendownload video Twitter: `{e}`")
+
+    finally:
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
+
+@bot.command()
+async def togif(ctx):
+    """Convert image/video menjadi GIF"""
+    if not PIL_AVAILABLE:
+        await ctx.send("❌ GIF conversion is not available. PIL/Pillow not installed.")
+        return
+
+    await ctx.send("🎞️ Sedang mengubah ke GIF...")
+
+    DOWNLOAD_LIMIT_BYTES = 10 * 1024 * 1024
+
+    attachment = None
+    if ctx.message.attachments:
+        attachment = ctx.message.attachments[0]
+    elif ctx.message.reference:
+        ref = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+        if ref.attachments:
+            attachment = ref.attachments[0]
+
+    if not attachment:
+        await ctx.send("⚠️ Tidak ada file yang ditemukan. Kirim atau reply file gambar/video!")
+        return
+
+    if attachment.size > DOWNLOAD_LIMIT_BYTES:
+        await ctx.send("⚠️ File terlalu besar (>10MB). Gunakan file yang lebih kecil!")
+        return
+
+    filename = os.path.join(DOWNLOADS_PATH, attachment.filename)
+    await attachment.save(filename)
+
+    output_path = os.path.splitext(filename)[0] + ".gif"
+
+    try:
+        if attachment.content_type.startswith("image/"):
+            await convert_image_to_gif_fixed(filename, output_path)
+        elif attachment.content_type.startswith("video/"):
+            await convert_video_to_gif_fixed(filename, output_path)
+        else:
+            await ctx.send("❌ Format file tidak didukung. Hanya gambar atau video!")
+            return
+
+        if not os.path.exists(output_path):
+            await ctx.send("❌ Gagal membuat GIF!")
+            return
+
+        if os.path.getsize(output_path) > DOWNLOAD_LIMIT_BYTES:
+            await ctx.send("⚠️ GIF hasilnya terlalu besar (>10MB). Coba file lebih pendek atau resolusi lebih kecil!")
+            return
+
+        file = discord.File(output_path, filename=os.path.basename(output_path))
+        await ctx.send("✅ Berhasil dikonversi ke GIF!", file=file)
+
+    except Exception as e:
+        await ctx.send(f"❌ Terjadi error saat konversi: `{e}`")
+
+    finally:
+        try:
+            for f in [filename, output_path]:
+                if os.path.exists(f):
+                    os.remove(f)
+        except:
+            pass
+
+# ============================
+# WAIFU SYSTEM COMMANDS
+# ============================
+
+@bot.command(name="claim")
+async def claim_waifu(ctx):
+    """Claim daily waifu"""
+    await handle_waifu_claim(ctx)
+
+@bot.command(name="resetclaim")
+async def reset_claim_user(ctx, member: discord.Member = None):
+    """Reset user's daily claim"""
+    ADMIN_ID = 869897744972668948
+    claim_file = "claimed_waifus.json"
+
+    if ctx.author.id != ADMIN_ID:
+        await ctx.send("🚫 Kamu tidak punya izin untuk menggunakan command ini.")
+        return
+
+    if member is None:
+        await ctx.send("⚠️ Tag user yang ingin kamu reset, contoh: `n.resetclaim @user`")
+        return
+
+    if not os.path.exists(claim_file):
+        await ctx.send("📁 File claim belum ada.")
+        return
+
+    try:
+        with open(claim_file, "r") as f:
+            content = f.read().strip()
+            data = json.loads(content) if content else {}
+    except json.JSONDecodeError:
+        data = {}
+
+    user_id = str(member.id)
+    if user_id not in data:
+        await ctx.send(f"🙃 {member.mention} belum pernah claim waifu.")
+        return
+
+    waifu_name = data[user_id]["waifu"]
+    data[user_id]["date"] = ""
+    data[user_id]["waifu"] = waifu_name
+    data[user_id]["count"] = data[user_id].get("count", 0)
+
+    with open(claim_file, "w") as f:
+        json.dump(data, f, indent=4)
+
+    await ctx.send(f"🔁 Claim harian {member.mention} telah direset. Sekarang dia bisa claim lagi hari ini 💞")
+
+@bot.command(name="topkarbit")
+async def top_karbit(ctx):
+    """Show waifu claim leaderboard"""
+    await get_top_karbit(ctx)
+
+# ============================
+# BAN SYSTEM FUNCTIONS
+# ============================
+
+BOT_BANS_FILE = "bot_bans.json"
+
+def load_bans():
+    if not os.path.exists(BOT_BANS_FILE):
+        with open(BOT_BANS_FILE, "w") as f:
+            json.dump({}, f)
+        return {}
+    try:
+        with open(BOT_BANS_FILE, "r") as f:
+            content = f.read().strip()
+            return json.loads(content) if content else {}
+    except json.JSONDecodeError:
+        return {}
+
+def save_bans(data):
+    with open(BOT_BANS_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+def is_timeout_expired(entry):
+    if not entry:
+        return True
+    if entry.get("type") != "timeout":
+        return False
+    until = entry.get("until")
+    if not until:
+        return True
+    try:
+        dt = datetime.fromisoformat(until)
+        return datetime.utcnow() >= dt
+    except Exception:
+        return True
+
+def cleanup_expired_timeouts():
+    data = load_bans()
+    changed = False
+    for uid, entry in list(data.items()):
+        if entry.get("type") == "timeout" and is_timeout_expired(entry):
+            del data[uid]
+            changed = True
+    if changed:
+        save_bans(data)
+
+@bot.check
+async def global_not_banned_check(ctx):
+    """Global ban check for all commands"""
+    cleanup_expired_timeouts()
+    data = load_bans()
+    user_id = str(ctx.author.id)
+    entry = data.get(user_id)
+    if not entry:
+        return True
+
+    if entry.get("type") == "ban":
+        await ctx.send(f"🚫 Maaf {ctx.author.mention}, kamu diblokir dari menggunakan bot ini. Alasan: {entry.get('reason','-')}")
+        return False
+
+    if entry.get("type") == "timeout":
+        if is_timeout_expired(entry):
+            del data[user_id]
+            save_bans(data)
+            return True
+        else:
+            until = entry.get("until")
+            await ctx.send(f"⏳ Maaf {ctx.author.mention}, akses bot dibatasi sampai **{until} UTC**. Alasan: {entry.get('reason','-')}")
+            return False
+
+    return True
+
+@bot.command(name="botban")
+@commands.has_permissions(administrator=True)
+async def bot_ban(ctx, member: discord.Member, *, reason: str = "Tidak disebutkan"):
+    """Ban user from using bot"""
+    data = load_bans()
+    uid = str(member.id)
+    data[uid] = {
+        "type": "ban",
+        "by": str(ctx.author.id),
+        "reason": reason,
+        "set_at": datetime.now(timezone.utc).isoformat()
+    }
+    save_bans(data)
+    await ctx.send(f"🔒 {member.mention} sekarang diblokir dari memakai bot. Alasan: {reason}")
+
+@bot.command(name="botunban")
+@commands.has_permissions(administrator=True)
+async def bot_unban(ctx, member: discord.User):
+    """Unban user from bot"""
+    data = load_bans()
+    uid = str(member.id)
+    if uid not in data:
+        await ctx.send(f"ℹ️ {member.mention} tidak ada di daftar blokir.")
+        return
+    del data[uid]
+    save_bans(data)
+    await ctx.send(f"✅ {member.mention} berhasil dihapus dari daftar blokir bot.")
+
+@bot.command(name="bottimeout")
+@commands.has_permissions(administrator=True)
+async def bot_timeout(ctx, member: discord.Member, minutes: int, *, reason: str = "Tidak disebutkan"):
+    """Timeout user from bot"""
+    if minutes <= 0:
+        await ctx.send("🚫 Durasi harus lebih dari 0 menit.")
+        return
+
+    until_dt = datetime.utcnow() + timedelta(minutes=minutes)
+    data = load_bans()
+    uid = str(member.id)
+    data[uid] = {
+        "type": "timeout",
+        "by": str(ctx.author.id),
+        "reason": reason,
+        "set_at": datetime.utcnow().isoformat(),
+        "until": until_dt.isoformat()
+    }
+    save_bans(data)
+    await ctx.send(f"⏳ {member.mention} dibatasi akses bot sampai **{until_dt.isoformat()} UTC**. Alasan: {reason}")
+
+@bot.command(name="botbanlist")
+@commands.has_permissions(administrator=True)
+async def bot_ban_list(ctx):
+    """Show bot ban list"""
+    cleanup_expired_timeouts()
+    data = load_bans()
+    if not data:
+        await ctx.send("📭 Tidak ada user yang diblokir dari bot.")
+        return
+
+    lines = []
+    for uid, entry in data.items():
+        typ = entry.get("type", "unknown")
+        reason = entry.get("reason", "-")
+        by = entry.get("by", "-")
+        if typ == "timeout":
+            until = entry.get("until", "-")
+            lines.append(f"<@{uid}> — {typ} until {until} UTC — reason: {reason} — by <@{by}>")
+        else:
+            lines.append(f"<@{uid}> — {typ} — reason: {reason} — by <@{by}>")
+
+    embed = discord.Embed(title="🔒 Bot Ban List", description="\n".join(lines[:20]))
+    await ctx.send(embed=embed)
+
+# ============================
+# HELP COMMAND
+# ============================
 
 @bot.command(aliases=['h', 'commands'])
 async def help(ctx, category: str = None):
     """Show all commands organized by categories"""
     
-    # PP Bot dan informasi creator
     bot_avatar = bot.user.avatar.url if bot.user.avatar else bot.user.default_avatar.url
-    github_avatar = "https://avatars.githubusercontent.com/u/117148725"  # Ganti dengan PP GitHub mu
+    github_avatar = "https://avatars.githubusercontent.com/u/117148725"
     creator_name = "nakzuwu"
     creator_url = "https://github.com/nakzuwu"
     
-    # Categories dengan command yang sebenarnya ada
     categories = {
         "music": {
             "name": "🎵 Music Commands",
@@ -994,7 +1585,6 @@ async def help(ctx, category: str = None):
         }
     }
 
-    # Jika user minta category spesifik
     if category and category.lower() in categories:
         cat_key = category.lower()
         cat_info = categories[cat_key]
@@ -1005,7 +1595,6 @@ async def help(ctx, category: str = None):
             color=0x00ff00
         )
         
-        # Add commands for this category
         for cmd_name, cmd_desc in cat_info['commands'].items():
             embed.add_field(
                 name=f"`{ctx.prefix}{cmd_name}`",
@@ -1017,24 +1606,16 @@ async def help(ctx, category: str = None):
         await ctx.send(embed=embed)
         return
 
-    # Main help menu dengan header yang keren
     embed = discord.Embed(
         title="REIKA BOT",
         description="Multi-purpose Discord bot with music, downloads, anime info, and more!",
         color=0x00ff00,
-        url="https://github.com/nakzuwu"  # Link ke GitHub mu
+        url="https://github.com/nakzuwu"
     )
     
-    # Header dengan PP Bot dan Creator info
-    embed.set_author(
-        name="Reika Bot", 
-        icon_url=bot_avatar
-    )
-    
-    # Thumbnail dengan PP GitHub
+    embed.set_author(name="Reika Bot", icon_url=bot_avatar)
     embed.set_thumbnail(url=github_avatar)
     
-    # Creator information
     embed.add_field(
         name="👨‍💻 Creator",
         value=f"[{creator_name}]({creator_url})",
@@ -1053,7 +1634,6 @@ async def help(ctx, category: str = None):
         inline=True
     )
     
-    # Add category overview
     for cat_key, cat_info in categories.items():
         command_count = len(cat_info['commands'])
         example_commands = list(cat_info['commands'].keys())[:2]
@@ -1065,7 +1645,6 @@ async def help(ctx, category: str = None):
             inline=False
         )
 
-    # Usage tips
     embed.add_field(
         name="💡 Usage Tips",
         value=(
@@ -1077,7 +1656,6 @@ async def help(ctx, category: str = None):
         inline=False
     )
     
-    # Footer dengan informasi tambahan
     embed.set_footer(
         text="Powered by Discord.py • Made with 💖 by nakzuwu",
         icon_url=github_avatar
@@ -1091,619 +1669,9 @@ async def help_error(ctx, error):
     if isinstance(error, commands.BadArgument):
         await ctx.send("❌ Category not found. Use `help` to see available categories.")
 
-# Auto-generate command descriptions for commands without help text
-def setup_command_help():
-    """Automatically add help text to commands that don't have it"""
-    command_descriptions = {
-        # Music commands
-        'play': 'Play a song or add to queue - supports YouTube, playlists, and search queries',
-        'skip': 'Skip the currently playing song',
-        'queue': 'Show the current music queue with pagination',
-        'loop': 'Toggle loop for the current song',
-        'loopqueue': 'Toggle queue looping',
-        'remove': 'Remove a song from the queue by position',
-        'clear': 'Clear all songs from the queue',
-        'volume': 'Set the playback volume (0-100) or show current volume',
-        'shuffle': 'Shuffle the current queue',
-        'move': 'Move a song from one position to another in the queue',
-        'stop': 'Stop playback and disconnect from voice channel',
-        
-        # Download commands
-        'yt': 'Download video from YouTube (max 480p with audio)',
-        'ytmp3': 'Download audio (MP3) from YouTube',
-        'fb': 'Download video from Facebook',
-        'ig': 'Download video from Instagram',
-        'twitter': 'Download video from Twitter/X with auto-upload for large files',
-        'ytthumbnail': 'Get YouTube video thumbnail from URL',
-        'togif': 'Convert image/video to GIF (reply to a file or attach one)',
-        
-        # Waifu commands
-        'claim': 'Claim your daily waifu - get a random waifu image each day',
-        'resetclaim': '[ADMIN] Reset daily claim for a user',
-        'topkarbit': 'Show leaderboard of top waifu claimers',
-    }
-    
-    for cmd_name, description in command_descriptions.items():
-        cmd = bot.get_command(cmd_name)
-        if cmd and not cmd.help:
-            cmd.help = description
-
-# Run the setup when bot starts
-@bot.event
-async def on_ready():
-    print(f'Logged in as {bot.user} (ID: {bot.user.id})')
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="n.help"))
-    setup_command_help()
-    
-    # Load MALCommands cog
-    try:
-        await bot.add_cog(MALCommands(bot))
-        print("✅ MALCommands cog loaded successfully!")
-    except Exception as e:
-        print(f"❌ Failed to load MALCommands cog: {e}")
-
 # ============================
-# MEDIA DOWNLOAD COMMANDS
+# MAL COMMANDS COG
 # ============================
-
-@bot.command()
-async def yt(ctx, url: str):
-    """Download video dari YouTube (maks 1080p)"""
-    await download_media(ctx, url, 'yt')
-
-@bot.command()
-async def ytmp3(ctx, url: str):
-    """Download audio (MP3) dari YouTube"""
-    await download_media(ctx, url, 'ytmp3')
-
-@bot.command()
-async def fb(ctx, url: str):
-    """Download video dari Facebook"""
-    await download_media(ctx, url, 'fb')
-
-@bot.command()
-async def ig(ctx, url: str):
-    """Download video dari Instagram"""
-    await download_media(ctx, url, 'ig')
-
-@bot.command(name="ytthumbnail")
-async def ytthumbnail(ctx, url: str = None):
-    if url is None:
-        await ctx.send("📺 Gunakan command seperti ini:\n`n.ytthumbnail <link_youtube>`")
-        return
-
-    # Regex ambil video ID dari URL YouTube
-    pattern = r"(?:v=|youtu\.be/|embed/)([a-zA-Z0-9_-]{11})"
-    match = re.search(pattern, url)
-
-    if not match:
-        await ctx.send("⚠️ Tidak bisa menemukan ID video YouTube dari link itu.")
-        return
-
-    video_id = match.group(1)
-    resolutions = [
-        f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",  # resolusi tertinggi
-        f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",      # fallback
-        f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg"       # fallback lagi
-    ]
-
-    # Coba ambil thumbnail yang tersedia
-    thumbnail_url = None
-    async with aiohttp.ClientSession() as session:
-        for res_url in resolutions:
-            async with session.get(res_url) as resp:
-                if resp.status == 200:
-                    thumbnail_url = res_url
-                    break
-
-    if thumbnail_url is None:
-        await ctx.send("😔 Tidak bisa menemukan thumbnail untuk video tersebut.")
-        return
-
-    # Buat embed cantik
-    embed = discord.Embed(
-        title="🎬 YouTube Thumbnail",
-        description=f"Thumbnail dari: {url}",
-        color=discord.Color.red()
-    )
-    embed.set_image(url=thumbnail_url)
-    embed.set_footer(text="Requested by " + ctx.author.name)
-
-    await ctx.send(embed=embed)
-    await ctx.send(f"🖼️ **Link download langsung:** {thumbnail_url}")
-
-@bot.command(name="twitter")
-async def download_twitter(ctx, url: str):
-    """
-    Download video dari Twitter (X) menggunakan yt-dlp.
-    Jika file terlalu besar (>25MB), akan diupload ke GoFile.io.
-    """
-    await ctx.send("🐦 Sedang memproses video Twitter...")
-
-    temp_filename = os.path.join(DOWNLOADS_PATH, "twitter_video.mp4")
-
-    # Hapus file lama kalau ada
-    if os.path.exists(temp_filename):
-        os.remove(temp_filename)
-
-    # Setup opsi yt-dlp
-    ydl_opts = {
-        "outtmpl": temp_filename,
-        "format": "mp4",
-        "quiet": True,
-        "no_warnings": True,
-        "merge_output_format": "mp4",
-    }
-
-    try:
-        # Download video
-        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-
-        # Cek ukuran file
-        file_size = os.path.getsize(temp_filename)
-        limit_bytes = 25 * 1024 * 1024  # 25 MB
-
-        if file_size <= limit_bytes:
-            await ctx.send("✅ Video berhasil diunduh!", file=File(temp_filename))
-        else:
-            await ctx.send("⚠️ File terlalu besar, sedang diupload ke GoFile.io...")
-
-            # Dapatkan server upload GoFile
-            server_info = requests.get("https://api.gofile.io/getServer").json()
-            if server_info["status"] != "ok":
-                await ctx.send("❌ Gagal ambil server GoFile.io.")
-                return
-
-            server = server_info["data"]["server"]
-
-            # Upload file ke GoFile
-            with open(temp_filename, "rb") as f:
-                response = requests.post(
-                    f"https://{server}.gofile.io/uploadFile",
-                    files={"file": f}
-                ).json()
-
-            if response["status"] == "ok":
-                download_link = response["data"]["downloadPage"]
-                await ctx.send(f"📦 Video terlalu besar, tapi sudah diupload!\n🔗 {download_link}")
-            else:
-                await ctx.send("❌ Gagal mengupload video ke GoFile.io.")
-
-    except Exception as e:
-        await ctx.send(f"❌ Gagal mendownload video Twitter: `{e}`")
-
-    finally:
-        # Bersihkan file sementara
-        if os.path.exists(temp_filename):
-            os.remove(temp_filename)
-
-@bot.command()
-async def togif(ctx):
-    """
-    Convert image/video menjadi GIF (<=10MB)
-    Bisa reply pesan dengan file, atau kirim file langsung.
-    """
-    await ctx.send("🎞️ Sedang mengubah ke GIF...")
-
-    DOWNLOAD_LIMIT_BYTES = 10 * 1024 * 1024
-
-    # ambil attachment dari reply atau message
-    attachment = None
-    if ctx.message.attachments:
-        attachment = ctx.message.attachments[0]
-    elif ctx.message.reference:
-        ref = await ctx.channel.fetch_message(ctx.message.reference.message_id)
-        if ref.attachments:
-            attachment = ref.attachments[0]
-
-    if not attachment:
-        return await ctx.send("⚠️ Tidak ada file yang ditemukan. Kirim atau reply file gambar/video!")
-
-    # Cek ukuran file
-    if attachment.size > DOWNLOAD_LIMIT_BYTES:
-        return await ctx.send("⚠️ File terlalu besar (>10MB). Gunakan file yang lebih kecil!")
-
-    filename = os.path.join(DOWNLOADS_PATH, attachment.filename)
-    await attachment.save(filename)
-
-    output_path = os.path.splitext(filename)[0] + ".gif"
-
-    try:
-        # Cek tipe file
-        if attachment.content_type.startswith("image/"):
-            # Gambar → GIF dengan fix warna putih
-            await convert_image_to_gif_fixed(filename, output_path)
-            
-        elif attachment.content_type.startswith("video/"):
-            # Video → GIF dengan fix error subclip
-            await convert_video_to_gif_fixed(filename, output_path)
-            
-        else:
-            return await ctx.send("❌ Format file tidak didukung. Hanya gambar atau video!")
-
-        # Cek ukuran hasil
-        if not os.path.exists(output_path):
-            return await ctx.send("❌ Gagal membuat GIF!")
-
-        if os.path.getsize(output_path) > DOWNLOAD_LIMIT_BYTES:
-            return await ctx.send("⚠️ GIF hasilnya terlalu besar (>10MB). Coba file lebih pendek atau resolusi lebih kecil!")
-
-        # Kirim hasil
-        file = discord.File(output_path, filename=os.path.basename(output_path))
-        await ctx.send("✅ Berhasil dikonversi ke GIF!", file=file)
-
-    except Exception as e:
-        await ctx.send(f"❌ Terjadi error saat konversi: `{e}`")
-
-    finally:
-        # Bersihkan file
-        try:
-            for f in [filename, output_path]:
-                if os.path.exists(f):
-                    os.remove(f)
-        except:
-            pass
-
-async def convert_image_to_gif_fixed(input_path, output_path):
-    """Convert image to GIF dengan teknik darken white"""
-    from PIL import Image, ImageEnhance
-    
-    with Image.open(input_path) as img:
-        # Convert ke RGB dulu
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-        
-        # Step 1: Gelapkan sedikit gambar agar putih tidak pure white
-        # Convert putih murni (255,255,255) jadi hampir putih (250,250,250)
-        img_data = img.getdata()
-        new_data = []
-        
-        for pixel in img_data:
-            r, g, b = pixel
-            # Jika pixel hampir putih (nilai > 240), kurangi sedikit
-            if r > 240 and g > 240 and b > 240:
-                r = max(200, r - 5)  # Jangan buat terlalu gelap, minimal 200
-                g = max(200, g - 5)
-                b = max(200, b - 5)
-            new_data.append((r, g, b))
-        
-        # Apply perubahan
-        img.putdata(new_data)
-        
-        # Step 2: Convert ke RGBA dan buat satu pixel transparan
-        img_rgba = img.convert('RGBA')
-        
-        # Buat satu pixel di sudut jadi fully transparent
-        width, height = img_rgba.size
-        if width > 0 and height > 0:
-            img_rgba.putpixel((0, 0), (0, 0, 0, 0))
-        
-        # Step 3: Save sebagai GIF dengan transparency
-        img_rgba.save(output_path, format='GIF', transparency=0, optimize=True)
-
-async def convert_image_to_gif_contrast(input_path, output_path):
-    """Convert image to GIF dengan adjust contrast dan brightness"""
-    from PIL import Image, ImageEnhance
-    
-    with Image.open(input_path) as img:
-        # Convert ke RGB
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-        
-        # Step 1: Kurangi brightness sedikit agar putih tidak pure
-        enhancer = ImageEnhance.Brightness(img)
-        img = enhancer.enhance(0.98)  # 98% brightness
-        
-        # Step 2: Tambah contrast sedikit agar warna tetap vibrant
-        enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(1.02)  # 102% contrast
-        
-        # Step 3: Convert ke RGBA
-        img_rgba = img.convert('RGBA')
-        
-        # Step 4: Buat border transparan 1 pixel
-        from PIL import ImageOps
-        bordered_img = ImageOps.expand(img_rgba, border=1, fill=(0, 0, 0, 0))
-        
-        # Step 5: Save sebagai GIF
-        bordered_img.save(output_path, format='GIF', transparency=0, optimize=True)
-
-async def convert_image_to_gif_colormap(input_path, output_path):
-    """Convert image to GIF dengan custom colormap yang preserve putih"""
-    from PIL import Image
-    
-    with Image.open(input_path) as img:
-        # Convert ke RGB
-        img_rgb = img.convert('RGB')
-        
-        # Step 1: Reduce colors to 255, sisakan 1 slot untuk putih
-        # Gunakan quantize dengan dither untuk hasil lebih baik
-        img_quantized = img_rgb.quantize(colors=255, method=Image.MEDIANCUT, dither=Image.NONE)
-        
-        # Step 2: Dapatkan palette dan modifikasi
-        palette = img_quantized.getpalette()
-        
-        # Step 3: Cari warna yang paling mendekati putih dalam palette
-        white_slot = -1
-        min_distance = float('inf')
-        
-        for i in range(0, len(palette), 3):
-            if i + 2 < len(palette):
-                r, g, b = palette[i], palette[i+1], palette[i+2]
-                # Hitung distance ke putih (255,255,255)
-                distance = abs(r-255) + abs(g-255) + abs(b-255)
-                if distance < min_distance:
-                    min_distance = distance
-                    white_slot = i // 3
-        
-        # Step 4: Jika found, ganti dengan putih murni
-        if white_slot != -1:
-            palette[white_slot*3] = 255      # R
-            palette[white_slot*3 + 1] = 255  # G  
-            palette[white_slot*3 + 2] = 255  # B
-            img_quantized.putpalette(palette)
-        
-        # Step 5: Convert ke RGBA untuk transparency
-        img_rgba = img_quantized.convert('RGBA')
-        
-        # Step 6: Buat satu pixel transparan
-        width, height = img_rgba.size
-        if width > 0 and height > 0:
-            img_rgba.putpixel((0, 0), (0, 0, 0, 0))
-        
-        # Step 7: Save
-        img_rgba.save(output_path, format='GIF', transparency=0, optimize=True)
-# ============================
-# WAIFU SYSTEM COMMANDS
-# ============================
-
-@bot.command(name="claim")
-async def claim_waifu(ctx):
-    await handle_waifu_claim(ctx)
-
-@bot.command(name="resetclaim")
-async def reset_claim_user(ctx, member: discord.Member = None):
-    ADMIN_ID = 869897744972668948
-    claim_file = "claimed_waifus.json"
-
-    if ctx.author.id != ADMIN_ID:
-        await ctx.send("🚫 Kamu tidak punya izin untuk menggunakan command ini.")
-        return
-
-    if member is None:
-        await ctx.send("⚠️ Tag user yang ingin kamu reset, contoh: `n.resetclaim @user`")
-        return
-
-    # Cek file data claim
-    if not os.path.exists(claim_file):
-        await ctx.send("📁 File claim belum ada.")
-        return
-
-    # Load data claim
-    try:
-        with open(claim_file, "r") as f:
-            content = f.read().strip()
-            data = json.loads(content) if content else {}
-    except json.JSONDecodeError:
-        data = {}
-
-    user_id = str(member.id)
-    if user_id not in data:
-        await ctx.send(f"🙃 {member.mention} belum pernah claim waifu.")
-        return
-
-    # Hapus tanggal claim agar bisa claim lagi hari ini
-    waifu_name = data[user_id]["waifu"]
-    data[user_id]["date"] = ""  # Reset hanya tanggal, bukan seluruh data
-    data[user_id]["waifu"] = waifu_name
-    data[user_id]["count"] = data[user_id].get("count", 0)  # Pastikan field count tetap ada
-
-    with open(claim_file, "w") as f:
-        json.dump(data, f, indent=4)
-
-    await ctx.send(f"🔁 Claim harian {member.mention} telah direset. Sekarang dia bisa claim lagi hari ini 💞")
-
-@bot.command(name="topkarbit")
-async def top_karbit(ctx):
-    await get_top_karbit(ctx)
-
-BOT_BANS_FILE = "bot_bans.json"
-
-# ---------- Helper load/save ----------
-def load_bans():
-    if not os.path.exists(BOT_BANS_FILE):
-        with open(BOT_BANS_FILE, "w") as f:
-            json.dump({}, f)
-        return {}
-    try:
-        with open(BOT_BANS_FILE, "r") as f:
-            content = f.read().strip()
-            return json.loads(content) if content else {}
-    except json.JSONDecodeError:
-        # jika rusak, reset ke {}
-        return {}
-
-def save_bans(data):
-    with open(BOT_BANS_FILE, "w") as f:
-        json.dump(data, f, indent=4)
-
-def is_timeout_expired(entry):
-    """Entry contoh: {'type':'timeout','until':'2025-10-10T12:34:56'}"""
-    if not entry:
-        return True
-    if entry.get("type") != "timeout":
-        return False
-    until = entry.get("until")
-    if not until:
-        return True
-    try:
-        dt = datetime.fromisoformat(until)
-        return datetime.utcnow() >= dt
-    except Exception:
-        return True
-
-def cleanup_expired_timeouts():
-    data = load_bans()
-    changed = False
-    for uid, entry in list(data.items()):
-        if entry.get("type") == "timeout" and is_timeout_expired(entry):
-            # hapus entry yang timeout-nya sudah lewat
-            del data[uid]
-            changed = True
-    if changed:
-        save_bans(data)
-
-# ---------- Global check for commands ----------
-@bot.check
-async def global_not_banned_check(ctx):
-    """
-    Dipanggil sebelum command mana pun.
-    Return False akan mencegah perintah dieksekusi.
-    """
-    cleanup_expired_timeouts()
-    data = load_bans()
-    user_id = str(ctx.author.id)
-    entry = data.get(user_id)
-    if not entry:
-        return True
-
-    # Permanent ban
-    if entry.get("type") == "ban":
-        # beri respon singkat
-        await ctx.send(f"🚫 Maaf {ctx.author.mention}, kamu diblokir dari menggunakan bot ini. Alasan: {entry.get('reason','-')}")
-        return False
-
-    # Timeout (sementara)
-    if entry.get("type") == "timeout":
-        if is_timeout_expired(entry):
-            # seharusnya sudah di-cleanup tapi double-check
-            del data[user_id]
-            save_bans(data)
-            return True
-        else:
-            until = entry.get("until")
-            await ctx.send(f"⏳ Maaf {ctx.author.mention}, akses bot dibatasi sampai **{until} UTC**. Alasan: {entry.get('reason','-')}")
-            return False
-
-    return True
-
-# ---------- Block auto-reply (on_message) ----------
-# Pastikan auto-reply memeriksa bans juga.
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-    cleanup_expired_timeouts()
-    data = load_bans()
-    if str(message.author.id) in data:
-        # Jika user dibanned/timeout, jangan balas keyword atau process command.
-        # Namun tetap proses commands supaya global check bisa memberi pesan spesifik.
-        await bot.process_commands(message)
-        return
-
-    content = message.content.lower()
-    
-    replies = {
-        "jawa": "jawa lagi, jawa lagi",
-        "nkj karbit": "maaf, nkj tidak karbit",
-        "my kisah": "karbitnyooo",
-        "bukankah ini": "bukan",
-        "samsul": "habis bensin",
-        "nkj anjeng": "you're done lil bro\n\nIP. 92.28.211.23\nN: 43.7462\nW: 12.4893 SS Number: 6979191519182043\nIPv6: fe80:5dcd.:ef69:fb22::d9 \nUPP: Enabled DMZ: 10.112.42\nMAC: 5A:78:3:7E:00\nDNS: 8.8.8.8\nALT DNS: 1.1.1.8.1\nDNS SUFFIX: Dink WAN: 100.236\nGATEWAY: 192.168\nUDP OPEN PORT: 8080.80",
-        "dika": "dika anjeng",
-        "osu": "yah ada osu, bete gw njing",
-        "help me reika": "In case of an investigation by any federal entity or similar, I do not have any involvement with this group or with the people in it, I do not know how I am here, probably added by a third party, I do not support any actions by members of this group.",
-        "lala": "Bete njing ada lala",
-        "bedwar": "bising bodo aku nak tido",
-        "my bebeb": "karbit bgt njeng",
-        "reika": "ap sh manggil manggil, nanti bebeb nkj marah lho",
-        "saran lagu": "https://youtu.be/wQu64bXbncI?si=ZM4srvzDHEDo6Oqx",
-        "kimi thread": "‼Kimi Thread ‼\nThis is going to be a thread on Kimi (also known as SakudaPikora, MrMolvanstress) and his inappropriate behavior with minors. As well as allowing minors into his discord server that is based off of his YouTube channel (which is very sexual in nature). I’m censoring the name of all minors to avoid exposing them to undesirables"    
-    }
-    for k, v in replies.items():
-        if k in content:
-            await message.channel.send(v)
-            break
-
-    await bot.process_commands(message)
-
-
-# Ubah permission check sesuai preferensi: pakai has_permissions(manage_guild=True) atau has_role
-# Di sini aku gunakan has_permissions(administrator=True) — hanya admin server yang bisa menjalankan.
-@bot.command(name="botban")
-@commands.has_permissions(administrator=True)
-async def bot_ban(ctx, member: discord.Member, *, reason: str = "Tidak disebutkan"):
-    data = load_bans()
-    uid = str(member.id)
-    data[uid] = {
-        "type": "ban",
-        "by": str(ctx.author.id),
-        "reason": reason,
-        "set_at": datetime.now(timezone.utc).isoformat()
-    }
-    save_bans(data)
-    await ctx.send(f"🔒 {member.mention} sekarang diblokir dari memakai bot. Alasan: {reason}")
-
-@bot.command(name="botunban")
-@commands.has_permissions(administrator=True)
-async def bot_unban(ctx, member: discord.User):
-    data = load_bans()
-    uid = str(member.id)
-    if uid not in data:
-        await ctx.send(f"ℹ️ {member.mention} tidak ada di daftar blokir.")
-        return
-    del data[uid]
-    save_bans(data)
-    await ctx.send(f"✅ {member.mention} berhasil dihapus dari daftar blokir bot.")
-
-@bot.command(name="bottimeout")
-@commands.has_permissions(administrator=True)
-async def bot_timeout(ctx, member: discord.Member, minutes: int, *, reason: str = "Tidak disebutkan"):
-    """
-    Contoh: n.bottimeout @user 60 spam
-    """
-    if minutes <= 0:
-        await ctx.send("🚫 Durasi harus lebih dari 0 menit.")
-        return
-
-    until_dt = datetime.utcnow() + timedelta(minutes=minutes)
-    data = load_bans()
-    uid = str(member.id)
-    data[uid] = {
-        "type": "timeout",
-        "by": str(ctx.author.id),
-        "reason": reason,
-        "set_at": datetime.utcnow().isoformat(),
-        "until": until_dt.isoformat()  # UTC
-    }
-    save_bans(data)
-    await ctx.send(f"⏳ {member.mention} dibatasi akses bot sampai **{until_dt.isoformat()} UTC**. Alasan: {reason}")
-
-@bot.command(name="botbanlist")
-@commands.has_permissions(administrator=True)
-async def bot_ban_list(ctx):
-    cleanup_expired_timeouts()
-    data = load_bans()
-    if not data:
-        await ctx.send("📭 Tidak ada user yang diblokir dari bot.")
-        return
-
-    lines = []
-    for uid, entry in data.items():
-        typ = entry.get("type", "unknown")
-        reason = entry.get("reason", "-")
-        by = entry.get("by", "-")
-        if typ == "timeout":
-            until = entry.get("until", "-")
-            lines.append(f"<@{uid}> — {typ} until {until} UTC — reason: {reason} — by <@{by}>")
-        else:
-            lines.append(f"<@{uid}> — {typ} — reason: {reason} — by <@{by}>")
-
-    # Kirim embed (atau pesan biasa jika terlalu panjang)
-    embed = discord.Embed(title="🔒 Bot Ban List", description="\n".join(lines[:20]))
-    await ctx.send(embed=embed)
 
 class MALCommands(commands.Cog):
     def __init__(self, bot):
@@ -1737,11 +1705,9 @@ class MALCommands(commands.Cog):
                             score = anime['score'] or "N/A"
                             status = anime['status']
                             
-                            # Ambil studio
                             studios = [studio['name'] for studio in anime.get('studios', [])[:2]]
                             studios_text = ", ".join(studios) if studios else "Unknown"
                             
-                            # Thumbnail
                             thumbnail = anime['images']['jpg']['image_url'] if anime.get('images') else None
                             
                             embed.add_field(
@@ -1756,7 +1722,6 @@ class MALCommands(commands.Cog):
                                 inline=False
                             )
                             
-                            # Set thumbnail untuk anime pertama
                             if i == 1 and thumbnail:
                                 embed.set_thumbnail(url=thumbnail)
                         
@@ -1786,7 +1751,6 @@ class MALCommands(commands.Cog):
                         
                         anime = data['data'][0]
                         
-                        # Buat embed detail
                         title = anime['title']
                         mal_url = anime['url']
                         score = anime['score'] or "N/A"
@@ -1796,14 +1760,12 @@ class MALCommands(commands.Cog):
                         if len(synopsis) > 500:
                             synopsis = synopsis[:500] + "..."
                         
-                        # Info tambahan dengan error handling
                         genres = [genre['name'] for genre in anime.get('genres', [])[:5]]
                         genres_text = ", ".join(genres) if genres else "Unknown"
                         
                         studios = [studio['name'] for studio in anime.get('studios', [])[:3]]
                         studios_text = ", ".join(studios) if studios else "Unknown"
                         
-                        # Thumbnail dengan error handling
                         thumbnail = None
                         if anime.get('images') and anime['images'].get('jpg'):
                             thumbnail = anime['images']['jpg'].get('large_image_url')
@@ -1881,7 +1843,6 @@ class MALCommands(commands.Cog):
         await ctx.send(f"📖 Mengambil info detail anime: {query}")
         
         try:
-            # Cari anime dulu
             search_url = f"{self.base_url}/anime?q={query}&limit=1"
             async with aiohttp.ClientSession() as session:
                 async with session.get(search_url) as response:
@@ -1897,21 +1858,18 @@ class MALCommands(commands.Cog):
                     anime_data = search_data['data'][0]
                     anime_id = anime_data['mal_id']
                     
-                    # Ambil data lengkap
                     detail_url = f"{self.base_url}/anime/{anime_id}/full"
                     async with session.get(detail_url) as detail_response:
                         if detail_response.status == 200:
                             full_data = await detail_response.json()
                             anime = full_data['data']
                             
-                            # Buat embed super detail dengan error handling
                             embed = discord.Embed(
                                 title=f"📚 {anime['title']}",
                                 url=anime['url'],
                                 color=0x2e51a2
                             )
                             
-                            # Basic info dengan error handling
                             embed.add_field(name="⭐ Score", value=anime.get('score', 'N/A'), inline=True)
                             embed.add_field(name="📊 Rank", value=f"#{anime['rank']}" if anime.get('rank') else "N/A", inline=True)
                             embed.add_field(name="👥 Popularity", value=f"#{anime['popularity']}" if anime.get('popularity') else "N/A", inline=True)
@@ -1920,26 +1878,22 @@ class MALCommands(commands.Cog):
                             embed.add_field(name="📅 Status", value=anime.get('status', 'Unknown'), inline=True)
                             embed.add_field(name="🎬 Type", value=anime.get('type', 'Unknown'), inline=True)
                             
-                            # Studios & Genres dengan error handling
                             studios = [s['name'] for s in anime.get('studios', [])]
                             genres = [g['name'] for g in anime.get('genres', [])]
                             
                             embed.add_field(name="🏢 Studios", value=", ".join(studios) if studios else "Unknown", inline=True)
                             embed.add_field(name="🎭 Genres", value=", ".join(genres[:5]) if genres else "Unknown", inline=True)
                             
-                            # Aired info dengan error handling
                             aired_info = "Unknown"
                             if anime.get('aired') and anime['aired'].get('string'):
                                 aired_info = anime['aired']['string']
                             embed.add_field(name="📆 Aired", value=aired_info, inline=True)
                             
-                            # Synopsis dengan error handling
                             synopsis = anime.get('synopsis') or "No synopsis available"
                             if len(synopsis) > 800:
                                 synopsis = synopsis[:800] + "..."
                             embed.add_field(name="📖 Synopsis", value=synopsis, inline=False)
                             
-                            # Thumbnail dengan error handling
                             if anime.get('images') and anime['images'].get('jpg'):
                                 thumbnail = anime['images']['jpg'].get('large_image_url')
                                 if thumbnail:
@@ -1957,7 +1911,6 @@ class MALCommands(commands.Cog):
     async def upcoming_anime(self, ctx):
         """Anime yang akan datang musim depan"""
         try:
-            # Tentukan musim berikutnya
             now = datetime.now()
             year = now.year
             month = now.month
@@ -2013,10 +1966,6 @@ class MALCommands(commands.Cog):
                 await ctx.send("⚠️ Rate limit exceeded! Tunggu beberapa detik sebelum request lagi.")
         elif isinstance(error, commands.CommandNotFound):
             pass
-
-# Tambahkan cog ke bot
-async def load_cogs():
-    await bot.add_cog(MALCommands(bot))
 
 # ============================
 # BOT START
