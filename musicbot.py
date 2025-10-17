@@ -79,7 +79,7 @@ class Song:
         minutes, seconds = divmod(self.duration, 60)
         return f"{minutes}:{seconds:02d}"
 
-# Ganti player global dengan dictionary untuk menyimpan player per guild
+        
 class MusicPlayer:
     def __init__(self):
         self.players = {}  # {guild_id: Player}
@@ -711,7 +711,6 @@ async def queue(ctx, page: int = 1):
         await ctx.send(simple_msg)
 
 
-
 @bot.command(aliases=['s'])
 async def skip(ctx):
     if not ctx.voice_client or not ctx.voice_client.is_playing():
@@ -889,6 +888,31 @@ async def lyrics(ctx, *, song_name: str = None):
     except Exception as e:
         await status_msg.edit(content=f"❌ Error fetching lyrics: {str(e)}")
 
+@bot.command(aliases=['leave', 'disconnect', 'dc'])
+async def stop(ctx):
+    """Stop playback and disconnect"""
+    if not ctx.voice_client:
+        return await ctx.send("ℹ️ I'm not in a voice channel!")
+    
+    # Dapatkan guild player
+    guild_player = get_guild_player(ctx)
+    
+    # Clear queue dan reset state untuk guild ini
+    guild_player['queue'].clear()
+    guild_player['current_song'] = None
+    guild_player['loop'] = False
+    guild_player['loop_queue'] = False
+    
+    # Stop playback dan disconnect
+    if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+        ctx.voice_client.stop()
+    
+    await ctx.voice_client.disconnect()
+    await ctx.message.add_reaction("🛑")
+    
+    guild_id = ctx.guild.id
+    if guild_id in player.players:
+        del player.players[guild_id]
 
 @bot.command(aliases=['h', 'commands'])
 async def help(ctx, category: str = None):
@@ -1118,17 +1142,6 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Failed to load MALCommands cog: {e}")
 
-@bot.command(aliases=['leave', 'disconnect', 'dc'])
-async def stop(ctx):
-    """Stop playback and disconnect"""
-    if not ctx.voice_client:
-        return await ctx.send("ℹ️ I'm not in a voice channel!")
-    
-    player.clear()
-    player.current_song = None
-    await ctx.voice_client.disconnect()
-    await ctx.message.add_reaction("🛑")
-
 # ============================
 # MEDIA DOWNLOAD COMMANDS
 # ============================
@@ -1287,6 +1300,10 @@ async def togif(ctx):
     if not attachment:
         return await ctx.send("⚠️ Tidak ada file yang ditemukan. Kirim atau reply file gambar/video!")
 
+    # Cek ukuran file
+    if attachment.size > DOWNLOAD_LIMIT_BYTES:
+        return await ctx.send("⚠️ File terlalu besar (>10MB). Gunakan file yang lebih kecil!")
+
     filename = os.path.join(DOWNLOADS_PATH, attachment.filename)
     await attachment.save(filename)
 
@@ -1295,19 +1312,20 @@ async def togif(ctx):
     try:
         # Cek tipe file
         if attachment.content_type.startswith("image/"):
-            # Gambar → GIF
-            with Image.open(filename) as img:
-                img.save(output_path, format="GIF")
+            # Gambar → GIF dengan fix warna putih
+            await convert_image_to_gif_fixed(filename, output_path)
+            
         elif attachment.content_type.startswith("video/"):
-            # Video → GIF (gunakan moviepy)
-            clip = mp.VideoFileClip(filename)
-            clip = clip.subclip(0, min(clip.duration, 10))  # Maks 10 detik agar kecil
-            clip = clip.resize(width=480)  # Biar efisien ukuran
-            clip.write_gif(output_path, program="ffmpeg", logger=None)
+            # Video → GIF dengan fix error subclip
+            await convert_video_to_gif_fixed(filename, output_path)
+            
         else:
             return await ctx.send("❌ Format file tidak didukung. Hanya gambar atau video!")
 
         # Cek ukuran hasil
+        if not os.path.exists(output_path):
+            return await ctx.send("❌ Gagal membuat GIF!")
+
         if os.path.getsize(output_path) > DOWNLOAD_LIMIT_BYTES:
             return await ctx.send("⚠️ GIF hasilnya terlalu besar (>10MB). Coba file lebih pendek atau resolusi lebih kecil!")
 
@@ -1327,6 +1345,115 @@ async def togif(ctx):
         except:
             pass
 
+async def convert_image_to_gif_fixed(input_path, output_path):
+    """Convert image to GIF dengan teknik darken white"""
+    from PIL import Image, ImageEnhance
+    
+    with Image.open(input_path) as img:
+        # Convert ke RGB dulu
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Step 1: Gelapkan sedikit gambar agar putih tidak pure white
+        # Convert putih murni (255,255,255) jadi hampir putih (250,250,250)
+        img_data = img.getdata()
+        new_data = []
+        
+        for pixel in img_data:
+            r, g, b = pixel
+            # Jika pixel hampir putih (nilai > 240), kurangi sedikit
+            if r > 240 and g > 240 and b > 240:
+                r = max(200, r - 5)  # Jangan buat terlalu gelap, minimal 200
+                g = max(200, g - 5)
+                b = max(200, b - 5)
+            new_data.append((r, g, b))
+        
+        # Apply perubahan
+        img.putdata(new_data)
+        
+        # Step 2: Convert ke RGBA dan buat satu pixel transparan
+        img_rgba = img.convert('RGBA')
+        
+        # Buat satu pixel di sudut jadi fully transparent
+        width, height = img_rgba.size
+        if width > 0 and height > 0:
+            img_rgba.putpixel((0, 0), (0, 0, 0, 0))
+        
+        # Step 3: Save sebagai GIF dengan transparency
+        img_rgba.save(output_path, format='GIF', transparency=0, optimize=True)
+
+async def convert_image_to_gif_contrast(input_path, output_path):
+    """Convert image to GIF dengan adjust contrast dan brightness"""
+    from PIL import Image, ImageEnhance
+    
+    with Image.open(input_path) as img:
+        # Convert ke RGB
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Step 1: Kurangi brightness sedikit agar putih tidak pure
+        enhancer = ImageEnhance.Brightness(img)
+        img = enhancer.enhance(0.98)  # 98% brightness
+        
+        # Step 2: Tambah contrast sedikit agar warna tetap vibrant
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(1.02)  # 102% contrast
+        
+        # Step 3: Convert ke RGBA
+        img_rgba = img.convert('RGBA')
+        
+        # Step 4: Buat border transparan 1 pixel
+        from PIL import ImageOps
+        bordered_img = ImageOps.expand(img_rgba, border=1, fill=(0, 0, 0, 0))
+        
+        # Step 5: Save sebagai GIF
+        bordered_img.save(output_path, format='GIF', transparency=0, optimize=True)
+
+async def convert_image_to_gif_colormap(input_path, output_path):
+    """Convert image to GIF dengan custom colormap yang preserve putih"""
+    from PIL import Image
+    
+    with Image.open(input_path) as img:
+        # Convert ke RGB
+        img_rgb = img.convert('RGB')
+        
+        # Step 1: Reduce colors to 255, sisakan 1 slot untuk putih
+        # Gunakan quantize dengan dither untuk hasil lebih baik
+        img_quantized = img_rgb.quantize(colors=255, method=Image.MEDIANCUT, dither=Image.NONE)
+        
+        # Step 2: Dapatkan palette dan modifikasi
+        palette = img_quantized.getpalette()
+        
+        # Step 3: Cari warna yang paling mendekati putih dalam palette
+        white_slot = -1
+        min_distance = float('inf')
+        
+        for i in range(0, len(palette), 3):
+            if i + 2 < len(palette):
+                r, g, b = palette[i], palette[i+1], palette[i+2]
+                # Hitung distance ke putih (255,255,255)
+                distance = abs(r-255) + abs(g-255) + abs(b-255)
+                if distance < min_distance:
+                    min_distance = distance
+                    white_slot = i // 3
+        
+        # Step 4: Jika found, ganti dengan putih murni
+        if white_slot != -1:
+            palette[white_slot*3] = 255      # R
+            palette[white_slot*3 + 1] = 255  # G  
+            palette[white_slot*3 + 2] = 255  # B
+            img_quantized.putpalette(palette)
+        
+        # Step 5: Convert ke RGBA untuk transparency
+        img_rgba = img_quantized.convert('RGBA')
+        
+        # Step 6: Buat satu pixel transparan
+        width, height = img_rgba.size
+        if width > 0 and height > 0:
+            img_rgba.putpixel((0, 0), (0, 0, 0, 0))
+        
+        # Step 7: Save
+        img_rgba.save(output_path, format='GIF', transparency=0, optimize=True)
 # ============================
 # WAIFU SYSTEM COMMANDS
 # ============================
