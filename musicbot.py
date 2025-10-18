@@ -288,7 +288,7 @@ async def play_next(ctx):
         # No more songs
         guild_player['current_song'] = None
         print("🎵 PLAY_NEXT - Queue empty")
-        
+
 # ============================
 # MEDIA DOWNLOAD FUNCTIONS
 # ============================
@@ -590,7 +590,7 @@ async def get_top_karbit(ctx):
 async def on_ready():
     """Bot startup handler"""
     print(f'✅ Logged in as {bot.user} (ID: {bot.user.id})')
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="n.help"))
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=f"{PREFIX}help"))
     
     # Load MALCommands cog
     try:
@@ -701,12 +701,14 @@ async def play(ctx, *, query):
     async with ctx.typing():
         try:
             if 'list=' in clean_query.lower() and ('youtube.com' in clean_query.lower() or 'youtu.be' in clean_query.lower()):
-                # Playlist handling
+                # Playlist handling - SUPPORT 1000+ SONGS
                 try:
                     ytdl_playlist = youtube_dl.YoutubeDL({
                         **ytdl_format_options,
                         'extract_flat': True,
-                        'noplaylist': False
+                        'noplaylist': False,
+                        'quiet': True,
+                        'no_warnings': True,
                     })
 
                     playlist_data = await bot.loop.run_in_executor(
@@ -718,22 +720,43 @@ async def play(ctx, *, query):
                         await status_msg.edit(content="❌ Couldn't process that playlist or playlist is empty")
                         return
 
+                    # Process semua songs tanpa batasan 100
                     songs = []
-                    for entry in playlist_data['entries']:
+                    total_entries = len(playlist_data['entries'])
+                    
+                    # Kirim status processing
+                    await status_msg.edit(content=f"🔄 Processing playlist... (0/{total_entries} songs)")
+                    
+                    for i, entry in enumerate(playlist_data['entries']):
                         if entry:
-                            songs.append(Song(entry, ctx.author))
-                            if len(songs) >= 100:
-                                break
+                            try:
+                                song = Song(entry, ctx.author)
+                                songs.append(song)
+                                
+                                # Update status setiap 50 songs agar tidak spam
+                                if i % 50 == 0:
+                                    await status_msg.edit(content=f"🔄 Processing playlist... ({i}/{total_entries} songs)")
+                                
+                                # Optional: Batas maksimal 1000 songs untuk prevent abuse
+                                if len(songs) >= 1000:
+                                    await ctx.send(f"⚠️ Playlist terlalu besar! Hanya mengambil 1000 lagu pertama.")
+                                    break
+                                    
+                            except Exception as e:
+                                print(f"Error processing playlist entry {i}: {e}")
+                                continue
 
                     if not songs:
                         await status_msg.edit(content="❌ No valid songs found in playlist")
                         return
 
+                    # Add songs to queue
                     guild_player['playlist_mode'] = True
                     for song in songs:
                         guild_player['queue'].append(song)
                     guild_player['playlist_mode'] = False
 
+                    # Mainkan jika belum main
                     if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
                         await play_next(ctx)
 
