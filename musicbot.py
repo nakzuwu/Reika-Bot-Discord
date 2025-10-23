@@ -62,12 +62,35 @@ ytdl_format_options = {
     'restrictfilenames': True,
     'noplaylist': True,
     'nocheckcertificate': True,
-    'ignoreerrors': False,
+    'ignoreerrors': True,
     'logtostderr': False,
     'quiet': True,
     'no_warnings': True,
     'default_search': 'auto',
     'source_address': '0.0.0.0',
+    
+    # yt-dlp specific fixes untuk YouTube
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'web'],
+            'player_skip': ['configs', 'webpage'],
+        }
+    },
+    
+    # Custom headers untuk avoid blocking
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-us,en;q=0.5',
+        'Accept-Encoding': 'gzip,deflate',
+        'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.7',
+        'Connection': 'keep-alive',
+    },
+    
+    # Retry settings
+    'retries': 10,
+    'fragment_retries': 10,
+    'skip_unavailable_fragments': True,
 }
 
 # Paths
@@ -1701,9 +1724,13 @@ class MALCommands(commands.Cog):
         self.bot = bot
         self.base_url = "https://api.jikan.moe/v4"
 
+    # ============================
+    # EXISTING COMMANDS - IMPROVED
+    # ============================
+
     @commands.command(name='seasonal')
-    async def seasonal_anime(self, ctx, limit: int = 10):
-        """Menampilkan anime yang sedang tayang musim ini"""
+    async def seasonal_anime(self, ctx, limit: int = 15):
+        """Menampilkan anime yang sedang tayang musim ini dengan detail"""
         await ctx.send("🎌 Mengambil data anime seasonal dari MyAnimeList...")
         
         try:
@@ -1714,55 +1741,64 @@ class MALCommands(commands.Cog):
                         data = await response.json()
                         anime_list = data['data'][:limit]
                         
+                        # Buat embed yang lebih informatif
                         embed = discord.Embed(
-                            title="📺 Anime Sedang Tayang (Musim Ini)",
-                            description=f"Data dari MyAnimeList | Menampilkan {len(anime_list)} anime",
+                            title="🍿 Anime Sedang Tayang (Musim Ini)",
+                            description=f"**{len(anime_list)} anime** yang sedang tayang musim ini\n*Gunakan `{ctx.prefix}anime <judul>` untuk info detail*",
                             color=0x2e51a2,
-                            url="https://myanimelist.net"
+                            url="https://myanimelist.net/anime/season"
                         )
                         
                         for i, anime in enumerate(anime_list, 1):
                             title = anime['title']
                             mal_url = anime['url']
                             episodes = anime['episodes'] or "TBA"
-                            score = anime['score'] or "N/A"
+                            score = anime['score'] or "Belum ada"
                             status = anime['status']
                             
-                            studios = [studio['name'] for studio in anime.get('studios', [])[:2]]
-                            studios_text = ", ".join(studios) if studios else "Unknown"
+                            # Info tambahan
+                            genres = [genre['name'] for genre in anime.get('genres', [])[:3]]
+                            genres_text = ", ".join(genres) if genres else "TBA"
                             
-                            thumbnail = anime['images']['jpg']['image_url'] if anime.get('images') else None
+                            studios = [studio['name'] for studio in anime.get('studios', [])[:2]]
+                            studios_text = ", ".join(studios) if studios else "TBA"
+                            
+                            # Format field value
+                            field_value = (
+                                f"**Score:** ⭐ {score}\n"
+                                f"**Episodes:** {episodes} | **Status:** {status}\n"
+                                f"**Genres:** {genres_text}\n"
+                                f"**Studio:** {studios_text}\n"
+                                f"🔗 [MyAnimeList]({mal_url})"
+                            )
                             
                             embed.add_field(
                                 name=f"#{i} {title}",
-                                value=(
-                                    f"⭐ **Score:** {score}/10\n"
-                                    f"📺 **Episodes:** {episodes}\n"
-                                    f"🏢 **Studio:** {studios_text}\n"
-                                    f"📊 **Status:** {status}\n"
-                                    f"🔗 [MyAnimeList]({mal_url})"
-                                ),
+                                value=field_value,
                                 inline=False
                             )
                             
-                            if i == 1 and thumbnail:
+                            # Set thumbnail untuk anime pertama
+                            if i == 1 and anime.get('images'):
+                                thumbnail = anime['images']['jpg']['image_url']
                                 embed.set_thumbnail(url=thumbnail)
                         
-                        embed.set_footer(text="Powered by Jikan API | MyAnimeList")
+                        embed.set_footer(text=f"Gunakan {ctx.prefix}anime <judul> untuk info detail • Powered by Jikan API")
                         await ctx.send(embed=embed)
                     else:
-                        await ctx.send("❌ Gagal mengambil data dari MyAnimeList")
+                        await ctx.send("❌ Gagal mengambil data seasonal anime")
                         
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)}")
 
     @commands.command(name='anime')
     async def search_anime(self, ctx, *, query):
-        """Mencari anime dan menampilkan link MAL"""
-        await ctx.send(f"🔍 Mencari anime di MyAnimeList: {query}")
+        """Mencari anime dengan rekomendasi dan info detail lengkap"""
+        await ctx.send(f"🔍 Mencari anime: **{query}**")
         
         try:
-            url = f"{self.base_url}/anime?q={query}&limit=1"
+            # Search dengan limit lebih banyak untuk rekomendasi
+            url = f"{self.base_url}/anime?q={query}&limit=5"
             async with aiohttp.ClientSession() as session:
                 async with session.get(url) as response:
                     if response.status == 200:
@@ -1772,46 +1808,32 @@ class MALCommands(commands.Cog):
                             await ctx.send("❌ Anime tidak ditemukan di MyAnimeList")
                             return
                         
-                        anime = data['data'][0]
+                        # Ambil anime pertama sebagai hasil utama
+                        main_anime = data['data'][0]
                         
-                        title = anime['title']
-                        mal_url = anime['url']
-                        score = anime['score'] or "N/A"
-                        episodes = anime['episodes'] or "TBA"
-                        status = anime['status']
-                        synopsis = anime.get('synopsis') or "No synopsis available"
-                        if len(synopsis) > 500:
-                            synopsis = synopsis[:500] + "..."
+                        # Ambil rekomendasi (anime lainnya)
+                        recommendations = data['data'][1:4]  # 3 rekomendasi
                         
-                        genres = [genre['name'] for genre in anime.get('genres', [])[:5]]
-                        genres_text = ", ".join(genres) if genres else "Unknown"
+                        # Ambil detail lengkap untuk anime utama
+                        anime_id = main_anime['mal_id']
+                        detail_url = f"{self.base_url}/anime/{anime_id}/full"
                         
-                        studios = [studio['name'] for studio in anime.get('studios', [])[:3]]
-                        studios_text = ", ".join(studios) if studios else "Unknown"
-                        
-                        thumbnail = None
-                        if anime.get('images') and anime['images'].get('jpg'):
-                            thumbnail = anime['images']['jpg'].get('large_image_url')
-                        
-                        embed = discord.Embed(
-                            title=f"🎌 {title}",
-                            url=mal_url,
-                            description=synopsis,
-                            color=0x2e51a2
-                        )
-                        
-                        embed.add_field(name="⭐ Score", value=score, inline=True)
-                        embed.add_field(name="📺 Episodes", value=episodes, inline=True)
-                        embed.add_field(name="📊 Status", value=status, inline=True)
-                        embed.add_field(name="🎭 Genres", value=genres_text, inline=True)
-                        embed.add_field(name="🏢 Studios", value=studios_text, inline=True)
-                        embed.add_field(name="🔗 MyAnimeList", value=f"[Link]({mal_url})", inline=True)
-                        
-                        if thumbnail:
-                            embed.set_thumbnail(url=thumbnail)
-                            
-                        embed.set_footer(text="Data dari MyAnimeList")
-                        await ctx.send(embed=embed)
+                        async with session.get(detail_url) as detail_response:
+                            if detail_response.status == 200:
+                                full_data = await detail_response.json()
+                                anime = full_data['data']
+                                
+                                # Buat embed utama yang sangat detail
+                                embed = self._create_detailed_anime_embed(anime, ctx)
+                                await ctx.send(embed=embed)
+                                
+                                # Kirim rekomendasi sebagai embed terpisah
+                                if recommendations:
+                                    await self._send_recommendations(ctx, recommendations, query)
+                                    
+                            else:
+                                # Fallback ke basic info jika detail gagal
+                                await self._send_basic_anime_info(ctx, main_anime)
                         
                     else:
                         await ctx.send("❌ Gagal mencari anime di MyAnimeList")
@@ -1820,8 +1842,8 @@ class MALCommands(commands.Cog):
             await ctx.send(f"❌ Error: {str(e)}")
 
     @commands.command(name='topanime')
-    async def top_anime(self, ctx, limit: int = 10):
-        """Menampilkan top anime dari MyAnimeList"""
+    async def top_anime(self, ctx, limit: int = 15):
+        """Menampilkan top anime dengan detail"""
         await ctx.send("🏆 Mengambil top anime dari MyAnimeList...")
         
         try:
@@ -1834,7 +1856,7 @@ class MALCommands(commands.Cog):
                         
                         embed = discord.Embed(
                             title="🏅 Top Anime MyAnimeList",
-                            description=f"Top {len(anime_list)} anime terbaik",
+                            description=f"**Top {len(anime_list)} anime** terbaik semua waktu\n*Gunakan `{ctx.prefix}anime <judul>` untuk info detail*",
                             color=0xffd700,
                             url="https://myanimelist.net/topanime.php"
                         )
@@ -1845,12 +1867,27 @@ class MALCommands(commands.Cog):
                             score = anime['score'] or "N/A"
                             episodes = anime['episodes'] or "TBA"
                             rank = anime.get('rank', 'N/A')
+                            members = f"{anime.get('members', 0):,}" if anime.get('members') else "N/A"
+                            
+                            # Info genres
+                            genres = [genre['name'] for genre in anime.get('genres', [])[:2]]
+                            genres_text = ", ".join(genres) if genres else "Various"
                             
                             embed.add_field(
                                 name=f"#{rank} {title}",
-                                value=f"⭐ {score} | 📺 {episodes} eps | [MAL]({mal_url})",
-                                inline=False
+                                value=(
+                                    f"⭐ **{score}** | 📺 **{episodes}** eps\n"
+                                    f"🎭 **{genres_text}**\n"
+                                    f"👥 **{members}** members\n"
+                                    f"🔗 [MAL]({mal_url})"
+                                ),
+                                inline=True
                             )
+                            
+                            # Set thumbnail untuk anime pertama
+                            if i == 1 and anime.get('images'):
+                                thumbnail = anime['images']['jpg']['image_url']
+                                embed.set_thumbnail(url=thumbnail)
                         
                         embed.set_footer(text="Data dari MyAnimeList Top Anime")
                         await ctx.send(embed=embed)
@@ -1862,8 +1899,8 @@ class MALCommands(commands.Cog):
 
     @commands.command(name='animeinfo')
     async def anime_detail(self, ctx, *, query):
-        """Info detail anime dari MyAnimeList"""
-        await ctx.send(f"📖 Mengambil info detail anime: {query}")
+        """Info super detail anime dari MyAnimeList"""
+        await ctx.send(f"📖 Mengambil info detail lengkap anime: **{query}**")
         
         try:
             search_url = f"{self.base_url}/anime?q={query}&limit=1"
@@ -1881,49 +1918,23 @@ class MALCommands(commands.Cog):
                     anime_data = search_data['data'][0]
                     anime_id = anime_data['mal_id']
                     
+                    # Ambil data lengkap
                     detail_url = f"{self.base_url}/anime/{anime_id}/full"
                     async with session.get(detail_url) as detail_response:
                         if detail_response.status == 200:
                             full_data = await detail_response.json()
                             anime = full_data['data']
                             
-                            embed = discord.Embed(
-                                title=f"📚 {anime['title']}",
-                                url=anime['url'],
-                                color=0x2e51a2
-                            )
-                            
-                            embed.add_field(name="⭐ Score", value=anime.get('score', 'N/A'), inline=True)
-                            embed.add_field(name="📊 Rank", value=f"#{anime['rank']}" if anime.get('rank') else "N/A", inline=True)
-                            embed.add_field(name="👥 Popularity", value=f"#{anime['popularity']}" if anime.get('popularity') else "N/A", inline=True)
-                            
-                            embed.add_field(name="📺 Episodes", value=anime.get('episodes', 'TBA'), inline=True)
-                            embed.add_field(name="📅 Status", value=anime.get('status', 'Unknown'), inline=True)
-                            embed.add_field(name="🎬 Type", value=anime.get('type', 'Unknown'), inline=True)
-                            
-                            studios = [s['name'] for s in anime.get('studios', [])]
-                            genres = [g['name'] for g in anime.get('genres', [])]
-                            
-                            embed.add_field(name="🏢 Studios", value=", ".join(studios) if studios else "Unknown", inline=True)
-                            embed.add_field(name="🎭 Genres", value=", ".join(genres[:5]) if genres else "Unknown", inline=True)
-                            
-                            aired_info = "Unknown"
-                            if anime.get('aired') and anime['aired'].get('string'):
-                                aired_info = anime['aired']['string']
-                            embed.add_field(name="📆 Aired", value=aired_info, inline=True)
-                            
-                            synopsis = anime.get('synopsis') or "No synopsis available"
-                            if len(synopsis) > 800:
-                                synopsis = synopsis[:800] + "..."
-                            embed.add_field(name="📖 Synopsis", value=synopsis, inline=False)
-                            
-                            if anime.get('images') and anime['images'].get('jpg'):
-                                thumbnail = anime['images']['jpg'].get('large_image_url')
-                                if thumbnail:
-                                    embed.set_thumbnail(url=thumbnail)
-                            
-                            embed.set_footer(text="Data lengkap dari MyAnimeList")
+                            # Buat embed super detail
+                            embed = self._create_super_detailed_anime_embed(anime, ctx)
                             await ctx.send(embed=embed)
+                            
+                            # Kirim info relationships (sequel, prequel, etc)
+                            await self._send_anime_relationships(ctx, anime)
+                            
+                            # Kirim info characters
+                            await self._send_anime_characters(ctx, anime_id)
+                            
                         else:
                             await ctx.send("❌ Gagal mengambil detail anime")
                             
@@ -1931,9 +1942,10 @@ class MALCommands(commands.Cog):
             await ctx.send(f"❌ Error: {str(e)}")
 
     @commands.command(name='upcoming')
-    async def upcoming_anime(self, ctx):
-        """Anime yang akan datang musim depan"""
+    async def upcoming_anime(self, ctx, limit: int = 12):
+        """Anime yang akan datang musim depan dengan detail"""
         try:
+            # Tentukan musim berikutnya
             now = datetime.now()
             year = now.year
             month = now.month
@@ -1953,11 +1965,11 @@ class MALCommands(commands.Cog):
                 async with session.get(url) as response:
                     if response.status == 200:
                         data = await response.json()
-                        anime_list = data['data'][:8]
+                        anime_list = data['data'][:limit]
                         
                         embed = discord.Embed(
                             title=f"🎬 Upcoming Anime ({next_season.capitalize()} {year})",
-                            description="Anime yang akan tayang musim depan",
+                            description=f"**{len(anime_list)} anime** yang akan tayang musim depan\n*Gunakan `{ctx.prefix}anime <judul>` untuk info detail*",
                             color=0x00ff00,
                             url=f"https://myanimelist.net/anime/season/{year}/{next_season}"
                         )
@@ -1967,20 +1979,851 @@ class MALCommands(commands.Cog):
                             mal_url = anime['url']
                             episodes = anime.get('episodes', 'TBA')
                             score = anime.get('score', 'Not rated')
+                            anime_type = anime.get('type', 'Unknown')
+                            
+                            # Info genres
+                            genres = [genre['name'] for genre in anime.get('genres', [])[:2]]
+                            genres_text = ", ".join(genres) if genres else "TBA"
                             
                             embed.add_field(
                                 name=title,
-                                value=f"📺 {episodes} eps | ⭐ {score} | [MAL]({mal_url})",
+                                value=(
+                                    f"**Type:** {anime_type} | **Episodes:** {episodes}\n"
+                                    f"**Genres:** {genres_text}\n"
+                                    f"⭐ **Score:** {score}\n"
+                                    f"🔗 [MAL]({mal_url})"
+                                ),
                                 inline=True
                             )
                         
-                        embed.set_footer(text=f"MyAnimeList {next_season.capitalize()} {year}")
+                        embed.set_footer(text=f"MyAnimeList {next_season.capitalize()} {year} • {len(anime_list)} anime")
                         await ctx.send(embed=embed)
                     else:
                         await ctx.send("❌ Gagal mengambil data upcoming anime")
                         
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)}")
+
+    # ============================
+    # NEW CHARACTER COMMANDS
+    # ============================
+
+    @commands.command(name='character', aliases=['char'])
+    async def search_character(self, ctx, *, query):
+        """Mencari karakter anime dan info detailnya dengan anime asal"""
+        await ctx.send(f"👤 Mencari karakter: **{query}**")
+        
+        try:
+            url = f"{self.base_url}/characters?q={query}&limit=10"  # Limit lebih banyak untuk akurasi
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        if not data['data']:
+                            await ctx.send("❌ Karakter tidak ditemukan")
+                            return
+                        
+                        # Cari karakter yang paling tepat match dengan query
+                        exact_match = None
+                        partial_matches = []
+                        
+                        for char in data['data']:
+                            char_name = char['name'].lower()
+                            query_lower = query.lower()
+                            
+                            # Exact match
+                            if char_name == query_lower:
+                                exact_match = char
+                                break
+                            # Partial match (contains)
+                            elif query_lower in char_name:
+                                partial_matches.append(char)
+                        
+                        # Prioritize exact match, then partial matches
+                        if exact_match:
+                            target_char = exact_match
+                        elif partial_matches:
+                            target_char = partial_matches[0]
+                        else:
+                            target_char = data['data'][0]  # Fallback ke pertama
+                        
+                        # Jika ada multiple matches, kirim pilihan
+                        if len(data['data']) > 1 and not exact_match:
+                            await self._send_character_choices(ctx, data['data'][:5], query)
+                        
+                        char_id = target_char['mal_id']
+                        
+                        # Ambil detail lengkap karakter
+                        detail_url = f"{self.base_url}/characters/{char_id}/full"
+                        async with session.get(detail_url) as detail_response:
+                            if detail_response.status == 200:
+                                char_data = await detail_response.json()
+                                character = char_data['data']
+                                
+                                await self._send_character_details(ctx, character)
+                                
+                            else:
+                                await self._send_basic_character_info(ctx, target_char)
+                        
+                    else:
+                        await ctx.send("❌ Gagal mencari karakter")
+                        
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+
+    async def _send_character_choices(self, ctx, characters, original_query):
+        """Kirim pilihan karakter jika ada multiple matches"""
+        embed = discord.Embed(
+            title="🔍 Multiple Characters Found",
+            description=f"Beberapa karakter ditemukan untuk **{original_query}**. Menggunakan hasil terbaik.\n\n**Pilihan lainnya:**",
+            color=0xffa500
+        )
+        
+        for i, char in enumerate(characters[1:4], 1):  # Tampilkan 3 pilihan lainnya
+            char_name = char['name']
+            char_url = char['url']
+            
+            # Coba dapatkan anime asal dari API
+            anime_origin = "Unknown"
+            try:
+                char_id = char['mal_id']
+                async with aiohttp.ClientSession() as session:
+                    detail_url = f"{self.base_url}/characters/{char_id}"
+                    async with session.get(detail_url) as response:
+                        if response.status == 200:
+                            char_data = await response.json()
+                            anime_list = char_data['data'].get('anime', [])
+                            if anime_list:
+                                anime_origin = anime_list[0]['anime']['name']
+            except:
+                pass
+            
+            embed.add_field(
+                name=f"{i}. {char_name}",
+                value=f"**Anime:** {anime_origin}\n[MyAnimeList]({char_url})",
+                inline=False
+            )
+        
+        embed.set_footer(text="Gunakan !character <nama lengkap> untuk hasil yang lebih spesifik")
+        await ctx.send(embed=embed)
+
+    @commands.command(name='va', aliases=['seiyuu', 'voiceactor'])
+    async def search_voice_actor(self, ctx, *, query):
+        """Mencari voice actor/aktris pengisi suara"""
+        await ctx.send(f"🎙️ Mencari voice actor: **{query}**")
+        
+        try:
+            url = f"{self.base_url}/people?q={query}&limit=5"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        if not data['data']:
+                            await ctx.send("❌ Voice actor tidak ditemukan")
+                            return
+                        
+                        # Ambil voice actor utama
+                        main_va = data['data'][0]
+                        va_id = main_va['mal_id']
+                        
+                        # Ambil detail lengkap
+                        detail_url = f"{self.base_url}/people/{va_id}/full"
+                        async with session.get(detail_url) as detail_response:
+                            if detail_response.status == 200:
+                                va_data = await detail_response.json()
+                                voice_actor = va_data['data']
+                                
+                                await self._send_voice_actor_details(ctx, voice_actor)
+                                
+                            else:
+                                await self._send_basic_voice_actor_info(ctx, main_va)
+                        
+                    else:
+                        await ctx.send("❌ Gagal mencari voice actor")
+                        
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+
+    @commands.command(name='compareva')
+    async def compare_voice_actors(self, ctx, *, characters):
+        """Membandingkan voice actor dua karakter dengan identifikasi yang jelas"""
+        try:
+            # Improved parsing untuk handle berbagai format
+            if ' vs ' in characters:
+                char_list = characters.split(' vs ')
+            elif ' VS ' in characters:
+                char_list = characters.split(' VS ')
+            else:
+                await ctx.send("❌ Format: `!compareva <karakter1> vs <karakter2>`\nContoh: `!compareva \"Tendou Alice\" vs \"Nakano Azusa\"`")
+                return
+            
+            if len(char_list) != 2:
+                await ctx.send("❌ Format: `!compareva <karakter1> vs <karakter2>`")
+                return
+            
+            char1_query, char2_query = [q.strip() for q in char_list]
+            await ctx.send(f"🔍 Membandingkan VA: **{char1_query}** 🆚 **{char2_query}**")
+            
+            # Cari kedua karakter dengan matching yang lebih baik
+            char1_data, char1_full = await self._find_character_with_anime(char1_query)
+            char2_data, char2_full = await self._find_character_with_anime(char2_query)
+            
+            if not char1_data:
+                await ctx.send(f"❌ Karakter tidak ditemukan: **{char1_query}**")
+                return
+            if not char2_data:
+                await ctx.send(f"❌ Karakter tidak ditemukan: **{char2_query}**")
+                return
+            
+            await self._send_voice_actor_comparison(ctx, char1_full, char2_full, char1_query, char2_query)
+                        
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+
+    async def _find_character_with_anime(self, query):
+        """Mencari karakter dengan info anime yang jelas"""
+        try:
+            url = f"{self.base_url}/characters?q={query}&limit=5"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        return None, None
+                    
+                    data = await response.json()
+                    if not data['data']:
+                        return None, None
+                    
+                    # Cari exact match dulu
+                    exact_match = None
+                    for char in data['data']:
+                        if char['name'].lower() == query.lower():
+                            exact_match = char
+                            break
+                    
+                    # Jika tidak ada exact match, gunakan yang pertama
+                    target_char = exact_match if exact_match else data['data'][0]
+                    
+                    # Ambil detail lengkap
+                    char_id = target_char['mal_id']
+                    detail_url = f"{self.base_url}/characters/{char_id}/full"
+                    async with session.get(detail_url) as detail_response:
+                        if detail_response.status == 200:
+                            char_data = await detail_response.json()
+                            return target_char, char_data['data']
+                        else:
+                            return target_char, None
+                            
+        except Exception as e:
+            print(f"Error finding character: {e}")
+            return None, None
+
+    # ============================
+    # HELPER METHODS
+    # ============================
+
+    def _create_detailed_anime_embed(self, anime, ctx):
+        """Membuat embed detail untuk anime"""
+        embed = discord.Embed(
+            title=f"🎌 {anime['title']}",
+            url=anime['url'],
+            color=0x2e51a2
+        )
+        
+        # Basic info
+        score = anime.get('score', 'N/A')
+        rank = f"#{anime['rank']}" if anime.get('rank') else "N/A"
+        popularity = f"#{anime['popularity']}" if anime.get('popularity') else "N/A"
+        
+        embed.add_field(name="⭐ Score", value=score, inline=True)
+        embed.add_field(name="🏆 Rank", value=rank, inline=True)
+        embed.add_field(name="👥 Popularity", value=popularity, inline=True)
+        
+        # Episode info
+        episodes = anime.get('episodes', 'TBA')
+        status = anime.get('status', 'Unknown')
+        anime_type = anime.get('type', 'Unknown')
+        
+        embed.add_field(name="📺 Episodes", value=episodes, inline=True)
+        embed.add_field(name="📅 Status", value=status, inline=True)
+        embed.add_field(name="🎬 Type", value=anime_type, inline=True)
+        
+        # Studios & Genres
+        studios = [s['name'] for s in anime.get('studios', [])]
+        genres = [g['name'] for g in anime.get('genres', [])]
+        
+        embed.add_field(name="🏢 Studios", value=", ".join(studios) if studios else "Unknown", inline=True)
+        embed.add_field(name="🎭 Genres", value=", ".join(genres[:5]) if genres else "Unknown", inline=True)
+        
+        # Aired info
+        aired_info = "Unknown"
+        if anime.get('aired') and anime['aired'].get('string'):
+            aired_info = anime['aired']['string']
+        embed.add_field(name="📆 Aired", value=aired_info, inline=True)
+        
+        # Synopsis
+        synopsis = anime.get('synopsis') or "No synopsis available"
+        if len(synopsis) > 800:
+            synopsis = synopsis[:800] + "..."
+        embed.add_field(name="📖 Synopsis", value=synopsis, inline=False)
+        
+        # Thumbnail
+        if anime.get('images') and anime['images'].get('jpg'):
+            thumbnail = anime['images']['jpg'].get('large_image_url')
+            if thumbnail:
+                embed.set_thumbnail(url=thumbnail)
+        
+        embed.set_footer(text=f"Gunakan {ctx.prefix}animeinfo untuk detail lengkap • MyAnimeList")
+        return embed
+
+    def _create_super_detailed_anime_embed(self, anime, ctx):
+        """Membuat embed super detail untuk anime"""
+        embed = discord.Embed(
+            title=f"📚 {anime['title']}",
+            url=anime['url'],
+            description=anime.get('synopsis', 'No synopsis available')[:300] + "...",
+            color=0x2e51a2
+        )
+        
+        # Extended info
+        embed.add_field(name="⭐ Score", value=anime.get('score', 'N/A'), inline=True)
+        embed.add_field(name="🏆 Rank", value=f"#{anime['rank']}" if anime.get('rank') else "N/A", inline=True)
+        embed.add_field(name="👥 Popularity", value=f"#{anime['popularity']}" if anime.get('popularity') else "N/A", inline=True)
+        
+        embed.add_field(name="📺 Episodes", value=anime.get('episodes', 'TBA'), inline=True)
+        embed.add_field(name="📅 Status", value=anime.get('status', 'Unknown'), inline=True)
+        embed.add_field(name="🎬 Type", value=anime.get('type', 'Unknown'), inline=True)
+        
+        # Duration and rating
+        duration = anime.get('duration', 'Unknown')
+        rating = anime.get('rating', 'Unknown')
+        embed.add_field(name="⏱️ Duration", value=duration, inline=True)
+        embed.add_field(name="🔞 Rating", value=rating, inline=True)
+        
+        # Studios & Producers
+        studios = [s['name'] for s in anime.get('studios', [])]
+        producers = [p['name'] for p in anime.get('producers', [])[:3]]
+        
+        embed.add_field(name="🏢 Studios", value=", ".join(studios) if studios else "Unknown", inline=True)
+        embed.add_field(name="💰 Producers", value=", ".join(producers) if producers else "Unknown", inline=True)
+        
+        # Genres & Themes
+        genres = [g['name'] for g in anime.get('genres', [])]
+        themes = [t['name'] for t in anime.get('themes', [])[:3]]
+        
+        embed.add_field(name="🎭 Genres", value=", ".join(genres) if genres else "Unknown", inline=True)
+        embed.add_field(name="🎪 Themes", value=", ".join(themes) if themes else "Unknown", inline=True)
+        
+        # Aired info
+        aired_info = "Unknown"
+        if anime.get('aired') and anime['aired'].get('string'):
+            aired_info = anime['aired']['string']
+        embed.add_field(name="📆 Aired", value=aired_info, inline=False)
+        
+        # Thumbnail
+        if anime.get('images') and anime['images'].get('jpg'):
+            thumbnail = anime['images']['jpg'].get('large_image_url')
+            if thumbnail:
+                embed.set_thumbnail(url=thumbnail)
+        
+        embed.set_footer(text="Lanjut ke message berikutnya untuk info relationships dan characters...")
+        return embed
+
+    async def _send_recommendations(self, ctx, recommendations, original_query):
+        """Mengirim embed rekomendasi anime"""
+        embed = discord.Embed(
+            title="💡 Rekomendasi Anime Lainnya",
+            description=f"Anime lain yang mirip dengan **{original_query}**",
+            color=0x00ff00
+        )
+        
+        for i, anime in enumerate(recommendations, 1):
+            title = anime['title']
+            mal_url = anime['url']
+            score = anime.get('score', 'N/A')
+            episodes = anime.get('episodes', 'TBA')
+            
+            embed.add_field(
+                name=f"{i}. {title}",
+                value=f"⭐ {score} | 📺 {episodes} eps | [MAL]({mal_url})",
+                inline=False
+            )
+        
+        await ctx.send(embed=embed)
+
+    async def _send_anime_relationships(self, ctx, anime):
+        """Mengirim info relationships (sequel, prequel, etc)"""
+        relations = anime.get('relations', [])
+        if not relations:
+            return
+        
+        embed = discord.Embed(
+            title="🔗 Related Anime",
+            color=0x888888
+        )
+        
+        for relation in relations[:6]:  # Batasi agar tidak terlalu panjang
+            relation_type = relation.get('relation', 'Unknown')
+            related_anime = relation.get('entry', [])
+            
+            if related_anime:
+                anime_titles = [f"[{anime['name']}]({anime['url']})" for anime in related_anime[:3]]
+                embed.add_field(
+                    name=relation_type.replace('_', ' ').title(),
+                    value=", ".join(anime_titles),
+                    inline=True
+                )
+        
+        if embed.fields:
+            await ctx.send(embed=embed)
+
+    async def _send_anime_characters(self, ctx, anime_id):
+        """Mengirim info karakter utama"""
+        try:
+            url = f"{self.base_url}/anime/{anime_id}/characters"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        characters = data['data'][:8]  # Ambil 8 karakter utama
+                        
+                        if not characters:
+                            return
+                        
+                        embed = discord.Embed(
+                            title="👥 Karakter Utama",
+                            color=0x3498db
+                        )
+                        
+                        for char in characters:
+                            char_name = char['character']['name']
+                            char_url = char['character']['url']
+                            va_name = char['voice_actors'][0]['person']['name'] if char.get('voice_actors') else "Unknown"
+                            va_url = char['voice_actors'][0]['person']['url'] if char.get('voice_actors') else "#"
+                            
+                            embed.add_field(
+                                name=char_name,
+                                value=f"VA: [{va_name}]({va_url})",
+                                inline=True
+                            )
+                        
+                        await ctx.send(embed=embed)
+                        
+        except Exception as e:
+            print(f"Error fetching characters: {e}")
+
+    async def _send_character_details(self, ctx, character):
+        embed = discord.Embed(
+            title=f"👤 {character['name']}",
+            url=character['url'],
+            color=0x3498db
+        )
+        
+        # Basic info
+        if character.get('name_kanji'):
+            embed.add_field(name="🈲 Nama Kanji", value=character['name_kanji'], inline=True)
+        
+        if character.get('favorites'):
+            embed.add_field(name="❤️ Favorites", value=f"{character['favorites']:,}", inline=True)
+        
+        # Anime Origin - INI YANG BARU
+        anime_origin = await self._get_character_anime_origin(character)
+        if anime_origin:
+            embed.add_field(name="🎬 Anime Asal", value=anime_origin, inline=True)
+        
+        # Nicknames
+        nicknames = character.get('nicknames', [])
+        if nicknames:
+            embed.add_field(name="🏷️ Nama Panggilan", value=", ".join(nicknames[:3]), inline=True)
+        
+        # About
+        about = character.get('about')
+        if about and len(about) > 400:
+            about = about[:400] + "..."
+        if about:
+            embed.add_field(name="📝 About", value=about, inline=False)
+        
+        # Thumbnail
+        if character.get('images') and character['images'].get('jpg'):
+            thumbnail = character['images']['jpg']['image_url']
+            embed.set_thumbnail(url=thumbnail)
+        
+        # Voice actors dengan bahasa
+        voice_actors = character.get('voices', [])
+        if voice_actors:
+            japanese_vas = [va for va in voice_actors if va.get('language', '').lower() == 'japanese']
+            if japanese_vas:
+                va_info = []
+                for va in japanese_vas[:2]:  # Max 2 Japanese VA
+                    person = va['person']
+                    va_info.append(f"[{person['name']}]({person['url']})")
+                
+                embed.add_field(name="🎙️ Japanese Voice Actors", value="\n".join(va_info), inline=False)
+        
+        await ctx.send(embed=embed)
+        
+        # Kirim info anime appearances terpisah
+        await self._send_character_anime_appearances(ctx, character)
+
+    async def _get_character_anime_origin(self, character):
+        """Mendapatkan anime asal karakter"""
+        try:
+            anime_appearances = character.get('anime', [])
+            if anime_appearances:
+                # Cari anime utama (biasanya yang pertama)
+                main_anime = anime_appearances[0]['anime']
+                return f"[{main_anime['name']}]({main_anime['url']})"
+        except:
+            pass
+        return None
+
+    async def _send_character_anime_appearances(self, ctx, character):
+        """Mengirim daftar anime tempat karakter muncul"""
+        anime_appearances = character.get('anime', [])
+        if not anime_appearances:
+            return
+        
+        embed = discord.Embed(
+            title=f"🎬 Penampilan {character['name']}",
+            color=0x9b59b6
+        )
+        
+        # Group by role
+        main_roles = []
+        supporting_roles = []
+        
+        for appearance in anime_appearances[:8]:  # Limit 8 anime
+            anime = appearance['anime']
+            role = appearance.get('role', 'Supporting').title()
+            
+            anime_info = f"[{anime['name']}]({anime['url']}) ({role})"
+            
+            if role == 'Main':
+                main_roles.append(anime_info)
+            else:
+                supporting_roles.append(anime_info)
+        
+        # Tampilkan main roles dulu
+        if main_roles:
+            embed.add_field(
+                name="🌟 Peran Utama",
+                value="\n".join(main_roles[:4]),
+                inline=False
+            )
+        
+        # Supporting roles
+        if supporting_roles:
+            embed.add_field(
+                name="📺 Peran Pendukung",
+                value="\n".join(supporting_roles[:4]),
+                inline=False
+            )
+        
+        if embed.fields:
+            await ctx.send(embed=embed)    
+            
+    async def _send_character_details(self, ctx, character):
+        """Mengirim detail karakter dengan info anime asal"""
+        embed = discord.Embed(
+            title=f"👤 {character['name']}",
+            url=character['url'],
+            color=0x3498db
+        )
+        
+        # Basic info
+        if character.get('name_kanji'):
+            embed.add_field(name="🈲 Nama Kanji", value=character['name_kanji'], inline=True)
+        
+        if character.get('favorites'):
+            embed.add_field(name="❤️ Favorites", value=f"{character['favorites']:,}", inline=True)
+        
+        # Anime Origin - INI YANG BARU
+        anime_origin = await self._get_character_anime_origin(character)
+        if anime_origin:
+            embed.add_field(name="🎬 Anime Asal", value=anime_origin, inline=True)
+        
+        # Nicknames
+        nicknames = character.get('nicknames', [])
+        if nicknames:
+            embed.add_field(name="🏷️ Nama Panggilan", value=", ".join(nicknames[:3]), inline=True)
+        
+        # About
+        about = character.get('about')
+        if about and len(about) > 400:
+            about = about[:400] + "..."
+        if about:
+            embed.add_field(name="📝 About", value=about, inline=False)
+        
+        # Thumbnail
+        if character.get('images') and character['images'].get('jpg'):
+            thumbnail = character['images']['jpg']['image_url']
+            embed.set_thumbnail(url=thumbnail)
+        
+        # Voice actors dengan bahasa
+        voice_actors = character.get('voices', [])
+        if voice_actors:
+            japanese_vas = [va for va in voice_actors if va.get('language', '').lower() == 'japanese']
+            if japanese_vas:
+                va_info = []
+                for va in japanese_vas[:2]:  # Max 2 Japanese VA
+                    person = va['person']
+                    va_info.append(f"[{person['name']}]({person['url']})")
+                
+                embed.add_field(name="🎙️ Japanese Voice Actors", value="\n".join(va_info), inline=False)
+        
+        await ctx.send(embed=embed)
+        
+        # Kirim info anime appearances terpisah
+        await self._send_character_anime_appearances(ctx, character)
+
+    async def _get_character_anime_origin(self, character):
+        """Mendapatkan anime asal karakter"""
+        try:
+            anime_appearances = character.get('anime', [])
+            if anime_appearances:
+                # Cari anime utama (biasanya yang pertama)
+                main_anime = anime_appearances[0]['anime']
+                return f"[{main_anime['name']}]({main_anime['url']})"
+        except:
+            pass
+        return None
+
+    async def _send_character_anime_appearances(self, ctx, character):
+        """Mengirim daftar anime tempat karakter muncul"""
+        anime_appearances = character.get('anime', [])
+        if not anime_appearances:
+            return
+        
+        embed = discord.Embed(
+            title=f"🎬 Penampilan {character['name']}",
+            color=0x9b59b6
+        )
+        
+        # Group by role
+        main_roles = []
+        supporting_roles = []
+        
+        for appearance in anime_appearances[:8]:  # Limit 8 anime
+            anime = appearance['anime']
+            role = appearance.get('role', 'Supporting').title()
+            
+            anime_info = f"[{anime['name']}]({anime['url']}) ({role})"
+            
+            if role == 'Main':
+                main_roles.append(anime_info)
+            else:
+                supporting_roles.append(anime_info)
+        
+        # Tampilkan main roles dulu
+        if main_roles:
+            embed.add_field(
+                name="🌟 Peran Utama",
+                value="\n".join(main_roles[:4]),
+                inline=False
+            )
+        
+        # Supporting roles
+        if supporting_roles:
+            embed.add_field(
+                name="📺 Peran Pendukung",
+                value="\n".join(supporting_roles[:4]),
+                inline=False
+            )
+        
+        if embed.fields:
+            await ctx.send(embed=embed)
+
+    async def _send_voice_actor_details(self, ctx, voice_actor):
+        """Mengirim detail voice actor"""
+        embed = discord.Embed(
+            title=f"🎙️ {voice_actor['name']}",
+            url=voice_actor['url'],
+            color=0xe74c3c
+        )
+        
+        # Basic info
+        if voice_actor.get('given_name'):
+            embed.add_field(name="📛 Given Name", value=voice_actor['given_name'], inline=True)
+        
+        if voice_actor.get('family_name'):
+            embed.add_field(name="👨‍👩‍👧‍👦 Family Name", value=voice_actor['family_name'], inline=True)
+        
+        if voice_actor.get('birthday'):
+            embed.add_field(name="🎂 Birthday", value=voice_actor['birthday'], inline=True)
+        
+        # About
+        about = voice_actor.get('about')
+        if about and len(about) > 400:
+            about = about[:400] + "..."
+        if about:
+            embed.add_field(name="📝 About", value=about, inline=False)
+        
+        # Thumbnail
+        if voice_actor.get('images') and voice_actor['images'].get('jpg'):
+            thumbnail = voice_actor['images']['jpg']['image_url']
+            embed.set_thumbnail(url=thumbnail)
+        
+        # Popular roles (max 5)
+        voices = voice_actor.get('voices', [])
+        if voices:
+            roles = []
+            for voice in voices[:5]:
+                character = voice['character']
+                anime = voice['anime'][0] if voice.get('anime') else None
+                if anime:
+                    roles.append(f"**{character['name']}** in [{anime['name']}]({anime['url']})")
+            
+            if roles:
+                embed.add_field(name="🎭 Popular Roles", value="\n".join(roles), inline=False)
+        
+        await ctx.send(embed=embed)
+
+    async def _send_voice_actor_comparison(self, ctx, char1, char2, char1_query, char2_query):
+        """Membandingkan voice actor dua karakter dengan info yang jelas"""
+        embed = discord.Embed(
+            title="🔊 Perbandingan Voice Actor",
+            color=0x9b59b6
+        )
+        
+        # Character 1 info dengan anime asal
+        char1_anime_origin = await self._get_character_anime_origin(char1)
+        char1_vas = char1.get('voices', [])
+        char1_japanese_vas = [va for va in char1_vas if va.get('language', '').lower() == 'japanese']
+        
+        char1_info = f"**Anime:** {char1_anime_origin or 'Unknown'}\n"
+        char1_info += "**Japanese VA:**\n"
+        if char1_japanese_vas:
+            for va in char1_japanese_vas[:2]:
+                person = va['person']
+                char1_info += f"• [{person['name']}]({person['url']})\n"
+        else:
+            char1_info += "• Not available\n"
+        
+        embed.add_field(
+            name=f"👤 {char1['name']}",
+            value=char1_info,
+            inline=True
+        )
+        
+        # Character 2 info dengan anime asal
+        char2_anime_origin = await self._get_character_anime_origin(char2)
+        char2_vas = char2.get('voices', [])
+        char2_japanese_vas = [va for va in char2_vas if va.get('language', '').lower() == 'japanese']
+        
+        char2_info = f"**Anime:** {char2_anime_origin or 'Unknown'}\n"
+        char2_info += "**Japanese VA:**\n"
+        if char2_japanese_vas:
+            for va in char2_japanese_vas[:2]:
+                person = va['person']
+                char2_info += f"• [{person['name']}]({person['url']})\n"
+        else:
+            char2_info += "• Not available\n"
+        
+        embed.add_field(
+            name=f"👤 {char2['name']}",
+            value=char2_info,
+            inline=True
+        )
+        
+        # Comparison result
+        char1_va_ids = {va['person']['mal_id'] for va in char1_japanese_vas}
+        char2_va_ids = {va['person']['mal_id'] for va in char2_japanese_vas}
+        common_vas = char1_va_ids.intersection(char2_va_ids)
+        
+        if common_vas:
+            common_va_names = []
+            for va in char1_japanese_vas:
+                if va['person']['mal_id'] in common_vas:
+                    common_va_names.append(f"[{va['person']['name']}]({va['person']['url']})")
+            
+            embed.add_field(
+                name="✅ Shared Voice Actors",
+                value=", ".join(common_va_names),
+                inline=False
+            )
+            
+            # Info tambahan: di anime apa mereka bersama?
+            shared_anime_info = await self._get_shared_anime_info(char1, char2, common_vas)
+            if shared_anime_info:
+                embed.add_field(
+                    name="🎬 Bersama di Anime",
+                    value=shared_anime_info,
+                    inline=False
+                )
+        else:
+            embed.add_field(
+                name="❌ No Shared Japanese Voice Actors",
+                value="Kedua karakter memiliki voice actor yang berbeda",
+                inline=False
+            )
+        
+        # Footer dengan query asli untuk konfirmasi
+        embed.set_footer(text=f"Query: {char1_query} vs {char2_query}")
+        await ctx.send(embed=embed)
+
+    async def _get_shared_anime_info(self, char1, char2, common_vas):
+        """Mendapatkan info anime dimana VA yang sama mengisi suara kedua karakter"""
+        try:
+            char1_anime = {anime['anime']['mal_id']: anime['anime']['name'] for anime in char1.get('anime', [])}
+            char2_anime = {anime['anime']['mal_id']: anime['anime']['name'] for anime in char2.get('anime', [])}
+            
+            shared_anime = []
+            for anime_id, anime_name in char1_anime.items():
+                if anime_id in char2_anime:
+                    shared_anime.append(anime_name)
+            
+            if shared_anime:
+                return ", ".join(shared_anime[:3])  # Max 3 anime
+        except:
+            pass
+        return None
+
+    async def _send_basic_anime_info(self, ctx, anime):
+        """Fallback untuk basic anime info"""
+        embed = discord.Embed(
+            title=f"🎌 {anime['title']}",
+            url=anime['url'],
+            color=0x2e51a2
+        )
+        
+        embed.add_field(name="⭐ Score", value=anime.get('score', 'N/A'), inline=True)
+        embed.add_field(name="📺 Episodes", value=anime.get('episodes', 'TBA'), inline=True)
+        embed.add_field(name="📅 Status", value=anime.get('status', 'Unknown'), inline=True)
+        
+        if anime.get('images') and anime['images'].get('jpg'):
+            thumbnail = anime['images']['jpg']['image_url']
+            embed.set_thumbnail(url=thumbnail)
+        
+        await ctx.send(embed=embed)
+
+    async def _send_basic_character_info(self, ctx, character):
+        """Fallback untuk basic character info"""
+        embed = discord.Embed(
+            title=f"👤 {character['name']}",
+            url=character['url'],
+            color=0x3498db
+        )
+        
+        if character.get('images') and character['images'].get('jpg'):
+            thumbnail = character['images']['jpg']['image_url']
+            embed.set_thumbnail(url=thumbnail)
+        
+        await ctx.send(embed=embed)
+
+    async def _send_basic_voice_actor_info(self, ctx, voice_actor):
+        """Fallback untuk basic voice actor info"""
+        embed = discord.Embed(
+            title=f"🎙️ {voice_actor['name']}",
+            url=voice_actor['url'],
+            color=0xe74c3c
+        )
+        
+        if voice_actor.get('images') and voice_actor['images'].get('jpg'):
+            thumbnail = voice_actor['images']['jpg']['image_url']
+            embed.set_thumbnail(url=thumbnail)
+        
+        await ctx.send(embed=embed)
 
     @commands.Cog.listener()
     async def on_command_error(self, ctx, error):
