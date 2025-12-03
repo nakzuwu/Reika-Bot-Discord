@@ -5,9 +5,6 @@ import asyncio
 from collections import deque
 from config import BOT_TOKEN, PREFIX
 
-# Suppress noise
-# youtube_dl.utils.bug_reports_message = lambda: ''
-
 # Configuration
 ytdl_format_options = {
     'format': 'bestaudio/best',
