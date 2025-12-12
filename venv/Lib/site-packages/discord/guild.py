@@ -76,6 +76,7 @@ from .enums import (
     AutoModRuleEventType,
     ForumOrderType,
     ForumLayoutType,
+    OnboardingMode,
 )
 from .mixins import Hashable
 from .user import User
@@ -91,6 +92,7 @@ from .sticker import GuildSticker
 from .file import File
 from .audit_logs import AuditLogEntry
 from .object import OLDEST_OBJECT, Object
+from .onboarding import Onboarding
 from .welcome_screen import WelcomeScreen, WelcomeChannel
 from .automod import AutoModRule, AutoModTrigger, AutoModRuleAction
 from .partial_emoji import _EmojiTag, PartialEmoji
@@ -139,6 +141,7 @@ if TYPE_CHECKING:
     from .types.widget import EditWidgetSettings
     from .types.audit_log import AuditLogEvent
     from .message import EmojiInputType
+    from .onboarding import OnboardingPrompt
 
     VocalGuildChannel = Union[VoiceChannel, StageChannel]
     GuildChannel = Union[VocalGuildChannel, ForumChannel, TextChannel, CategoryChannel]
@@ -216,8 +219,8 @@ class GuildPreview(Hashable):
         'stickers',
         'features',
         'description',
-        "approximate_member_count",
-        "approximate_presence_count",
+        'approximate_member_count',
+        'approximate_presence_count',
     )
 
     def __init__(self, *, data: GuildPreviewPayload, state: ConnectionState) -> None:
@@ -1293,8 +1296,7 @@ class Guild(Hashable):
         overwrites: Mapping[Union[Role, Member, Object], PermissionOverwrite] = ...,
         category: Optional[Snowflake] = ...,
         **options: Any,
-    ) -> Coroutine[Any, Any, TextChannelPayload]:
-        ...
+    ) -> Coroutine[Any, Any, TextChannelPayload]: ...
 
     @overload
     def _create_channel(
@@ -1304,8 +1306,7 @@ class Guild(Hashable):
         overwrites: Mapping[Union[Role, Member, Object], PermissionOverwrite] = ...,
         category: Optional[Snowflake] = ...,
         **options: Any,
-    ) -> Coroutine[Any, Any, VoiceChannelPayload]:
-        ...
+    ) -> Coroutine[Any, Any, VoiceChannelPayload]: ...
 
     @overload
     def _create_channel(
@@ -1315,8 +1316,7 @@ class Guild(Hashable):
         overwrites: Mapping[Union[Role, Member, Object], PermissionOverwrite] = ...,
         category: Optional[Snowflake] = ...,
         **options: Any,
-    ) -> Coroutine[Any, Any, StageChannelPayload]:
-        ...
+    ) -> Coroutine[Any, Any, StageChannelPayload]: ...
 
     @overload
     def _create_channel(
@@ -1326,8 +1326,7 @@ class Guild(Hashable):
         overwrites: Mapping[Union[Role, Member, Object], PermissionOverwrite] = ...,
         category: Optional[Snowflake] = ...,
         **options: Any,
-    ) -> Coroutine[Any, Any, CategoryChannelPayload]:
-        ...
+    ) -> Coroutine[Any, Any, CategoryChannelPayload]: ...
 
     @overload
     def _create_channel(
@@ -1337,8 +1336,7 @@ class Guild(Hashable):
         overwrites: Mapping[Union[Role, Member, Object], PermissionOverwrite] = ...,
         category: Optional[Snowflake] = ...,
         **options: Any,
-    ) -> Coroutine[Any, Any, NewsChannelPayload]:
-        ...
+    ) -> Coroutine[Any, Any, NewsChannelPayload]: ...
 
     @overload
     def _create_channel(
@@ -1348,8 +1346,7 @@ class Guild(Hashable):
         overwrites: Mapping[Union[Role, Member, Object], PermissionOverwrite] = ...,
         category: Optional[Snowflake] = ...,
         **options: Any,
-    ) -> Coroutine[Any, Any, Union[TextChannelPayload, NewsChannelPayload]]:
-        ...
+    ) -> Coroutine[Any, Any, Union[TextChannelPayload, NewsChannelPayload]]: ...
 
     @overload
     def _create_channel(
@@ -1359,8 +1356,7 @@ class Guild(Hashable):
         overwrites: Mapping[Union[Role, Member, Object], PermissionOverwrite] = ...,
         category: Optional[Snowflake] = ...,
         **options: Any,
-    ) -> Coroutine[Any, Any, ForumChannelPayload]:
-        ...
+    ) -> Coroutine[Any, Any, ForumChannelPayload]: ...
 
     @overload
     def _create_channel(
@@ -1370,8 +1366,7 @@ class Guild(Hashable):
         overwrites: Mapping[Union[Role, Member, Object], PermissionOverwrite] = ...,
         category: Optional[Snowflake] = ...,
         **options: Any,
-    ) -> Coroutine[Any, Any, GuildChannelPayload]:
-        ...
+    ) -> Coroutine[Any, Any, GuildChannelPayload]: ...
 
     def _create_channel(
         self,
@@ -1560,6 +1555,7 @@ class Guild(Hashable):
         rtc_region: Optional[str] = MISSING,
         video_quality_mode: VideoQualityMode = MISSING,
         overwrites: Mapping[Union[Role, Member, Object], PermissionOverwrite] = MISSING,
+        nsfw: bool = MISSING,
     ) -> VoiceChannel:
         """|coro|
 
@@ -1597,6 +1593,10 @@ class Guild(Hashable):
             The camera video quality for the voice channel's participants.
 
             .. versionadded:: 2.0
+        nsfw: :class:`bool`
+            To mark the channel as NSFW or not.
+
+            .. versionadded:: 2.6
         reason: Optional[:class:`str`]
             The reason for creating this channel. Shows up on the audit log.
 
@@ -1632,6 +1632,9 @@ class Guild(Hashable):
                 raise TypeError('video_quality_mode must be of type VideoQualityMode')
             options['video_quality_mode'] = video_quality_mode.value
 
+        if nsfw is not MISSING:
+            options['nsfw'] = nsfw
+
         data = await self._create_channel(
             name, overwrites=overwrites, channel_type=ChannelType.voice, category=category, reason=reason, **options
         )
@@ -1653,6 +1656,7 @@ class Guild(Hashable):
         rtc_region: Optional[str] = MISSING,
         video_quality_mode: VideoQualityMode = MISSING,
         overwrites: Mapping[Union[Role, Member, Object], PermissionOverwrite] = MISSING,
+        nsfw: bool = MISSING,
     ) -> StageChannel:
         """|coro|
 
@@ -1696,6 +1700,10 @@ class Guild(Hashable):
             The camera video quality for the voice channel's participants.
 
             .. versionadded:: 2.2
+        nsfw: :class:`bool`
+            To mark the channel as NSFW or not.
+
+            .. versionadded:: 2.6
         reason: Optional[:class:`str`]
             The reason for creating this channel. Shows up on the audit log.
 
@@ -1731,6 +1739,9 @@ class Guild(Hashable):
             if not isinstance(video_quality_mode, VideoQualityMode):
                 raise TypeError('video_quality_mode must be of type VideoQualityMode')
             options['video_quality_mode'] = video_quality_mode.value
+
+        if nsfw is not MISSING:
+            options['nsfw'] = nsfw
 
         data = await self._create_channel(
             name, overwrites=overwrites, channel_type=ChannelType.stage_voice, category=category, reason=reason, **options
@@ -1800,6 +1811,7 @@ class Guild(Hashable):
         category: Optional[CategoryChannel] = None,
         slowmode_delay: int = MISSING,
         nsfw: bool = MISSING,
+        media: bool = MISSING,
         overwrites: Mapping[Union[Role, Member, Object], PermissionOverwrite] = MISSING,
         reason: Optional[str] = None,
         default_auto_archive_duration: int = MISSING,
@@ -1862,12 +1874,17 @@ class Guild(Hashable):
             .. versionadded:: 2.3
         default_layout: :class:`ForumLayoutType`
             The default layout for posts in this forum.
+            This cannot be set if ``media`` is set to ``True``.
 
             .. versionadded:: 2.3
         available_tags: Sequence[:class:`ForumTag`]
             The available tags for this forum channel.
 
             .. versionadded:: 2.1
+        media: :class:`bool`
+            Whether to create a media forum channel.
+
+            .. versionadded:: 2.6
 
         Raises
         -------
@@ -1919,7 +1936,7 @@ class Guild(Hashable):
             else:
                 raise ValueError(f'default_reaction_emoji parameter must be either Emoji, PartialEmoji, or str')
 
-        if default_layout is not MISSING:
+        if not media and default_layout is not MISSING:
             if not isinstance(default_layout, ForumLayoutType):
                 raise TypeError(
                     f'default_layout parameter must be a ForumLayoutType not {default_layout.__class__.__name__}'
@@ -1931,10 +1948,19 @@ class Guild(Hashable):
             options['available_tags'] = [t.to_dict() for t in available_tags]
 
         data = await self._create_channel(
-            name=name, overwrites=overwrites, channel_type=ChannelType.forum, category=category, reason=reason, **options
+            name=name,
+            overwrites=overwrites,
+            channel_type=ChannelType.forum if not media else ChannelType.media,
+            category=category,
+            reason=reason,
+            **options,
         )
 
-        channel = ForumChannel(state=self._state, guild=self, data=data)
+        channel = ForumChannel(
+            state=self._state,
+            guild=self,
+            data=data,  # pyright: ignore[reportArgumentType] # it's the correct data
+        )
 
         # temporarily add to the cache
         self._channels[channel.id] = channel
@@ -1945,11 +1971,6 @@ class Guild(Hashable):
 
         Leaves the guild.
 
-        .. note::
-
-            You cannot leave the guild that you own, you must delete it instead
-            via :meth:`delete`.
-
         Raises
         --------
         HTTPException
@@ -1957,11 +1978,15 @@ class Guild(Hashable):
         """
         await self._state.http.leave_guild(self.id)
 
+    @utils.deprecated()
     async def delete(self) -> None:
         """|coro|
 
         Deletes the guild. You must be the guild owner to delete the
         guild.
+
+        .. deprecated:: 2.6
+           This method is deprecated and will be removed in a future version.
 
         Raises
         --------
@@ -2062,6 +2087,9 @@ class Guild(Hashable):
         owner: :class:`Member`
             The new owner of the guild to transfer ownership to. Note that you must
             be owner of the guild to do this.
+
+            .. deprecated:: 2.6
+               This parameter is deprecated and will be removed in a future version as bots can no longer own guilds.
         verification_level: :class:`VerificationLevel`
             The new verification level for the guild.
         default_notifications: :class:`NotificationLevel`
@@ -2070,6 +2098,9 @@ class Guild(Hashable):
             The new explicit content filter for the guild.
         vanity_code: :class:`str`
             The new vanity code for the guild.
+
+            .. deprecated:: 2.6
+               This parameter is deprecated and will be removed in a future version as bots can no longer set this.
         system_channel: Optional[:class:`TextChannel`]
             The new channel that is used for the system channel. Could be ``None`` for no system channel.
         system_channel_flags: :class:`SystemChannelFlags`
@@ -2117,6 +2148,8 @@ class Guild(Hashable):
             Note that you must be owner of the guild to do this.
 
             .. versionadded:: 2.3
+            .. deprecated:: 2.6
+               This parameter is deprecated and will be removed in a future version as bots can no longer own guilds.
         reason: Optional[:class:`str`]
             The reason for editing this guild. Shows up on the audit log.
 
@@ -2921,6 +2954,11 @@ class Guild(Hashable):
             The name of the template.
         description: :class:`str`
             The description of the template.
+
+        Returns
+        --------
+        :class:`Template`
+            The created template.
         """
         from .template import Template
 
@@ -3202,8 +3240,7 @@ class Guild(Hashable):
         description: str = ...,
         image: bytes = ...,
         reason: Optional[str] = ...,
-    ) -> ScheduledEvent:
-        ...
+    ) -> ScheduledEvent: ...
 
     @overload
     async def create_scheduled_event(
@@ -3218,8 +3255,7 @@ class Guild(Hashable):
         description: str = ...,
         image: bytes = ...,
         reason: Optional[str] = ...,
-    ) -> ScheduledEvent:
-        ...
+    ) -> ScheduledEvent: ...
 
     @overload
     async def create_scheduled_event(
@@ -3233,8 +3269,7 @@ class Guild(Hashable):
         description: str = ...,
         image: bytes = ...,
         reason: Optional[str] = ...,
-    ) -> ScheduledEvent:
-        ...
+    ) -> ScheduledEvent: ...
 
     @overload
     async def create_scheduled_event(
@@ -3248,8 +3283,7 @@ class Guild(Hashable):
         description: str = ...,
         image: bytes = ...,
         reason: Optional[str] = ...,
-    ) -> ScheduledEvent:
-        ...
+    ) -> ScheduledEvent: ...
 
     async def create_scheduled_event(
         self,
@@ -3361,7 +3395,7 @@ class Guild(Hashable):
 
         if entity_type is None:
             raise TypeError(
-                'invalid GuildChannel type passed, must be VoiceChannel or StageChannel ' f'not {channel.__class__.__name__}'
+                f'invalid GuildChannel type passed, must be VoiceChannel or StageChannel not {channel.__class__.__name__}'
             )
 
         if privacy_level is not MISSING:
@@ -3614,8 +3648,9 @@ class Guild(Hashable):
         hoist: bool = ...,
         display_icon: Union[bytes, str] = MISSING,
         mentionable: bool = ...,
-    ) -> Role:
-        ...
+        secondary_colour: Optional[Union[Colour, int]] = ...,
+        tertiary_colour: Optional[Union[Colour, int]] = ...,
+    ) -> Role: ...
 
     @overload
     async def create_role(
@@ -3628,8 +3663,9 @@ class Guild(Hashable):
         hoist: bool = ...,
         display_icon: Union[bytes, str] = MISSING,
         mentionable: bool = ...,
-    ) -> Role:
-        ...
+        secondary_color: Optional[Union[Colour, int]] = ...,
+        tertiary_color: Optional[Union[Colour, int]] = ...,
+    ) -> Role: ...
 
     async def create_role(
         self,
@@ -3642,6 +3678,10 @@ class Guild(Hashable):
         display_icon: Union[bytes, str] = MISSING,
         mentionable: bool = MISSING,
         reason: Optional[str] = None,
+        secondary_color: Optional[Union[Colour, int]] = MISSING,
+        tertiary_color: Optional[Union[Colour, int]] = MISSING,
+        secondary_colour: Optional[Union[Colour, int]] = MISSING,
+        tertiary_colour: Optional[Union[Colour, int]] = MISSING,
     ) -> Role:
         """|coro|
 
@@ -3661,6 +3701,10 @@ class Guild(Hashable):
             This function will now raise :exc:`TypeError` instead of
             ``InvalidArgument``.
 
+        .. versionchanged:: 2.6
+            The ``colour`` and ``color`` parameters now set the role's primary color.
+
+
         Parameters
         -----------
         name: :class:`str`
@@ -3670,6 +3714,15 @@ class Guild(Hashable):
         colour: Union[:class:`Colour`, :class:`int`]
             The colour for the role. Defaults to :meth:`Colour.default`.
             This is aliased to ``color`` as well.
+        secondary_colour: Optional[Union[:class:`Colour`, :class:`int`]]
+            The secondary colour for the role.
+
+            .. versionadded:: 2.6
+        tertiary_colour: Optional[Union[:class:`Colour`, :class:`int`]]
+            The tertiary colour for the role. Can only be used for the holographic role preset,
+            which is ``(11127295, 16759788, 16761760)``
+
+            .. versionadded:: 2.6
         hoist: :class:`bool`
             Indicates if the role should be shown separately in the member list.
             Defaults to ``False``.
@@ -3704,11 +3757,34 @@ class Guild(Hashable):
         else:
             fields['permissions'] = '0'
 
+        colours: Dict[str, Any] = {}
+
         actual_colour = colour or color or Colour.default()
         if isinstance(actual_colour, int):
-            fields['color'] = actual_colour
+            colours['primary_color'] = actual_colour
         else:
-            fields['color'] = actual_colour.value
+            colours['primary_color'] = actual_colour.value
+
+        actual_secondary_colour = secondary_colour or secondary_color
+        actual_tertiary_colour = tertiary_colour or tertiary_color
+
+        if actual_secondary_colour is not MISSING:
+            if actual_secondary_colour is None:
+                colours['secondary_color'] = None
+            elif isinstance(actual_secondary_colour, int):
+                colours['secondary_color'] = actual_secondary_colour
+            else:
+                colours['secondary_color'] = actual_secondary_colour.value
+
+        if actual_tertiary_colour is not MISSING:
+            if actual_tertiary_colour is None:
+                colours['tertiary_color'] = None
+            elif isinstance(actual_tertiary_colour, int):
+                colours['tertiary_color'] = actual_tertiary_colour
+            else:
+                colours['tertiary_color'] = actual_tertiary_colour.value
+
+        fields['colors'] = colours
 
         if hoist is not MISSING:
             fields['hoist'] = hoist
@@ -4789,3 +4865,74 @@ class Guild(Hashable):
 
         data = await self._state.http.create_soundboard_sound(self.id, reason=reason, **payload)
         return SoundboardSound(guild=self, state=self._state, data=data)
+
+    async def onboarding(self) -> Onboarding:
+        """|coro|
+
+        Fetches the onboarding configuration for this guild.
+
+        .. versionadded:: 2.6
+
+        Returns
+        --------
+        :class:`Onboarding`
+            The onboarding configuration that was fetched.
+        """
+        data = await self._state.http.get_guild_onboarding(self.id)
+        return Onboarding(data=data, guild=self, state=self._state)
+
+    async def edit_onboarding(
+        self,
+        *,
+        prompts: List[OnboardingPrompt] = MISSING,
+        default_channels: List[Snowflake] = MISSING,
+        enabled: bool = MISSING,
+        mode: OnboardingMode = MISSING,
+        reason: str = MISSING,
+    ) -> Onboarding:
+        """|coro|
+
+        Edits the onboarding configuration for this guild.
+
+        You must have :attr:`Permissions.manage_guild` and
+        :attr:`Permissions.manage_roles` to do this.
+
+        .. versionadded:: 2.6
+
+        Parameters
+        -----------
+        prompts: List[:class:`OnboardingPrompt`]
+            The prompts that will be shown to new members.
+            This overrides the existing prompts and its options.
+        default_channels: List[:class:`abc.Snowflake`]
+            The channels that will be used as the default channels for new members.
+            This overrides the existing default channels.
+        enabled: :class:`bool`
+            Whether the onboarding configuration is enabled.
+            This overrides the existing enabled state.
+        mode: :class:`OnboardingMode`
+            The mode that will be used for the onboarding configuration.
+        reason: :class:`str`
+            The reason for editing the onboarding configuration. Shows up on the audit log.
+
+        Raises
+        -------
+        Forbidden
+            You do not have permissions to edit the onboarding configuration.
+        HTTPException
+            Editing the onboarding configuration failed.
+
+        Returns
+        --------
+        :class:`Onboarding`
+            The new onboarding configuration.
+        """
+        data = await self._state.http.edit_guild_onboarding(
+            self.id,
+            prompts=[p.to_dict(id=i) for i, p in enumerate(prompts)] if prompts is not MISSING else None,
+            default_channel_ids=[c.id for c in default_channels] if default_channels is not MISSING else None,
+            enabled=enabled if enabled is not MISSING else None,
+            mode=mode.value if mode is not MISSING else None,
+            reason=reason if reason is not MISSING else None,
+        )
+        return Onboarding(data=data, guild=self, state=self._state)

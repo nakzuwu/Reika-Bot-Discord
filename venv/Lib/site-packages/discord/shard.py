@@ -52,6 +52,12 @@ if TYPE_CHECKING:
     from .activity import BaseActivity
     from .flags import Intents
     from .types.gateway import SessionStartLimit
+    from .client import _ClientOptions
+
+    class _AutoShardedClientOptions(_ClientOptions, total=False):
+        shard_ids: List[int]
+        shard_connect_timeout: Optional[float]
+
 
 __all__ = (
     'AutoShardedClient',
@@ -313,7 +319,7 @@ class SessionStartLimits:
         The number of identify requests allowed per 5 seconds
     """
 
-    __slots__ = ("total", "remaining", "reset_after", "max_concurrency")
+    __slots__ = ('total', 'remaining', 'reset_after', 'max_concurrency')
 
     def __init__(self, **kwargs: Unpack[SessionStartLimit]):
         self.total: int = kwargs['total']
@@ -365,7 +371,7 @@ class AutoShardedClient(Client):
     if TYPE_CHECKING:
         _connection: AutoShardedConnectionState
 
-    def __init__(self, *args: Any, intents: Intents, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, intents: Intents, **kwargs: Unpack[_AutoShardedClientOptions]) -> None:
         kwargs.pop('shard_id', None)
         self.shard_ids: Optional[List[int]] = kwargs.pop('shard_ids', None)
         self.shard_connect_timeout: Optional[float] = kwargs.pop('shard_connect_timeout', 180.0)
@@ -517,10 +523,10 @@ class AutoShardedClient(Client):
             if item.type == EventType.close:
                 await self.close()
                 if isinstance(item.error, ConnectionClosed):
-                    if item.error.code != 1000:
-                        raise item.error
                     if item.error.code == 4014:
                         raise PrivilegedIntentsRequired(item.shard.id) from None
+                    if item.error.code != 1000:
+                        raise item.error
                 return
             elif item.type in (EventType.identify, EventType.resume):
                 await item.shard.reidentify(item.error)
