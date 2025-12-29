@@ -8,12 +8,14 @@ import re
 import aiohttp
 import asyncio
 import time
+from pathlib import Path
 from discord.ext import commands
 from discord import File
 from datetime import datetime, timedelta, timezone
 from collections import deque
 from config import BOT_TOKEN, PREFIX, GENIUS_API_KEY
 
+COOKIES_PATH = Path('cookies.txt')
 # Third-party imports dengan error handling
 try:
     import yt_dlp as youtube_dl
@@ -69,30 +71,27 @@ ytdl_format_options = {
     'default_search': 'auto',
     'source_address': '0.0.0.0',
     
-    # yt-dlp specific fixes untuk YouTube
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['android', 'web'],
-            'player_skip': ['configs', 'webpage'],
-        }
-    },
+    # ⭐⭐ NONAKTIFKAN SEMUA FITUR RESUME/CACHE ⭐⭐
+    'no_cache_dir': True,
+    'cachedir': False,
+    'nooverwrites': False,
+    'continuedl': False,
+    'nopart': True,
+    'updatetime': False,
     
-    # Custom headers untuk avoid blocking
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-us,en;q=0.5',
-        'Accept-Encoding': 'gzip,deflate',
-        'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.7',
-        'Connection': 'keep-alive',
-    },
+    # ⭐⭐ FORCE FRESH DOWNLOAD SETIAP KALI ⭐⭐
+    'forceurl': True,
+    'forcetitle': True,
+    'forceid': True,
+    'forcejson': True,
+    'forcethumbnail': True,
+    'forcedescription': True,
+    'forcefilename': True,
+    'forceduration': True,
     
-    # Retry settings
-    'retries': 10,
-    'fragment_retries': 10,
-    'skip_unavailable_fragments': True,
+    # Hanya gunakan cookies jika file ada
+    **({'cookiefile': str(COOKIES_PATH)} if COOKIES_PATH.exists() else {})
 }
-
 # Paths
 DOWNLOADS_PATH = "downloads"
 os.makedirs(DOWNLOADS_PATH, exist_ok=True)
@@ -204,113 +203,476 @@ async def get_context_from_guild(guild_id):
 # MUSIC CORE FUNCTIONS
 # ============================
 
-async def play_song(voice_client, song):
-    """Play a song in voice channel dengan state management"""
-    if not YTDL_AVAILABLE:
-        return
-    
-    guild_id = voice_client.guild.id
-    guild_player = get_guild_player_by_id(guild_id)
-    
+def get_ffmpeg_options(force_start_zero=True):
+    """Get FFmpeg options yang PASTI mulai dari 0"""
+    if force_start_zero:
+        return {
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -ss 0 -nostdin',
+            'options': '-vn -b:a 128k -af "aresample=async=1:min_hard_comp=0.100:first_pts=0"'
+        }
+    return {
+        'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin',
+        'options': '-vn -b:a 128k'
+    }
+
+async def play_song(voice_client, song, ctx=None):
+    """Play song dengan PASTI mulai dari detik 0 - FIXED VERSION"""
     try:
-        # Update state
-        guild_player['is_playing'] = True
-        guild_player['skip_requested'] = False
+        print(f"🎵 Starting FRESH playback for: {song.title}")
         
-        print(f"🎵 Preparing to play: {song.title}")
+        # SIMPAN CONTEXT ATAU BUAT CONTEXT BARU
+        if ctx is None:
+            guild = voice_client.guild
+            text_channel = None
+            for channel in guild.text_channels:
+                if channel.permissions_for(guild.me).send_messages:
+                    text_channel = channel
+                    break
+            
+            if text_channel:
+                class FakeContext:
+                    def __init__(self):
+                        self.voice_client = voice_client
+                        self.guild = guild
+                        self.channel = text_channel
+                        self.author = guild.me
+                ctx = FakeContext()
         
-        with youtube_dl.YoutubeDL(ytdl_format_options) as ytdl:
-            data = await bot.loop.run_in_executor(
+        guild_id = voice_client.guild.id
+        
+        import time
+        import random
+        
+        timestamp = int(time.time())
+        random_str = random.randint(100000, 999999)
+        
+        # Config tanpa cache
+        fresh_opts = {
+            **ytdl_format_options,
+            'no_cache_dir': True,
+            'cachedir': False,
+            'force_generic_extractor': True,
+        }
+        
+        # ====== PERBAIKAN 1: TAMPILKAN STATUS SEARCH ======
+        if 'search:' in song.url.lower() or 'ytsearch:' in song.url.lower():
+            print("🔍 Processing search query...")
+            if ctx and hasattr(ctx, 'channel'):
+                try:
+                    await ctx.channel.send("🔍 Mencari lagu...")
+                except:
+                    pass
+        
+        with youtube_dl.YoutubeDL(fresh_opts) as ydl:
+            info = await bot.loop.run_in_executor(
                 None,
-                lambda: ytdl.extract_info(song.url, download=False)
+                lambda: ydl.extract_info(song.url, download=False)
             )
             
-            audio_url = data['url']
+            if not info or 'url' not in info:
+                raise Exception("No audio URL found")
             
-            source = discord.FFmpegPCMAudio(
-                audio_url,
-                before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin',
-                options='-vn'
+            url = info['url']
+            
+            # Tambahkan parameter anti-cache
+            if '?' in url:
+                url = f"{url}&_nocache={timestamp}{random_str}&_start=0"
+            else:
+                url = f"{url}?_nocache={timestamp}{random_str}&_start=0"
+            
+            print(f"🔗 Fresh URL: {url[:80]}...")
+        
+        # ====== PERBAIKAN 2: CEK JIKA URL VALID ======
+        if not url or url.strip() == '':
+            raise Exception("Invalid audio URL obtained")
+        
+        # FFMPEG OPTIONS dengan timeout yang lebih baik
+        ffmpeg_opts = {
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -ss 0 -nostdin -timeout 60000000',
+            'options': '-vn -b:a 128k -bufsize 1024k'
+        }
+        
+        # Stop playback yang ada
+        if voice_client.is_playing() or voice_client.is_paused():
+            voice_client.stop()
+            await asyncio.sleep(0.5)
+        
+        # ====== PERBAIKAN 3: FLAG UNTUK TRACK PLAYBACK STATE ======
+        playback_started = False
+        playback_error = None
+        
+        # Buat audio source dengan timeout
+        try:
+            source = await discord.FFmpegOpusAudio.from_probe(
+                url,
+                **ffmpeg_opts,
+                timeout=30  # Timeout 30 detik
             )
+        except Exception as e:
+            print(f"⚠️ FFmpegOpusAudio probe failed: {e}")
+            try:
+                source = discord.FFmpegPCMAudio(
+                    url,
+                    **ffmpeg_opts
+                )
+            except Exception as e2:
+                print(f"❌ FFmpegPCMAudio failed: {e2}")
+                raise Exception(f"Gagal membuat audio source: {e2}")
+        
+        # ====== PERBAIKAN 4: CALLBACK YANG LEBIH AMAN ======
+        def after_playing(error):
+            """Callback setelah lagu selesai"""
+            nonlocal playback_started, playback_error
             
-            volume = guild_player['volume']
+            print(f"🔔 After playing callback triggered. Error: {error}")
             
-            def after_playing(error):
-                if error:
-                    print(f'Player error: {error}')
-                
-                # Update state
-                guild_player['is_playing'] = False
-                
-                # Only trigger next if skip wasn't requested
-                if not guild_player.get('skip_requested', False):
-                    print("🔄 AFTER_PLAYING - Triggering next song naturally")
-                    asyncio.run_coroutine_threadsafe(play_next_by_guild(guild_id), bot.loop)
+            # Jika belum pernah mulai playback, ini adalah error awal
+            if not playback_started:
+                print("⚠️ Callback triggered before playback started!")
+                playback_error = error
+                return  # JANGAN panggil play_next jika belum mulai!
+            
+            # Langsung panggil play_next untuk guild ini
+            if error:
+                print(f"⚠️ Playback error: {error}")
+            
+            # Gunakan asyncio.run_coroutine_threadsafe untuk bot loop
+            async def play_next_wrapper():
+                try:
+                    print(f"🔄 Callback: Attempting to play next for guild {guild_id}")
+                    
+                    # TUNGGU 2 DETIK untuk memastikan state konsisten
+                    await asyncio.sleep(2)
+                    
+                    # Cek jika voice client masih connected
+                    voice_client_found = None
+                    for vc in bot.voice_clients:
+                        if vc.guild.id == guild_id and vc.is_connected():
+                            voice_client_found = vc
+                            break
+                    
+                    if not voice_client_found:
+                        print("❌ Voice client not found or disconnected")
+                        return
+                    
+                    # Cari text channel
+                    guild = voice_client_found.guild
+                    text_channel = None
+                    for channel in guild.text_channels:
+                        if channel.permissions_for(guild.me).send_messages:
+                            text_channel = channel
+                            break
+                    
+                    if text_channel:
+                        class FakeContext:
+                            def __init__(self):
+                                self.voice_client = voice_client_found
+                                self.guild = guild
+                                self.channel = text_channel
+                                self.author = guild.me
+                        
+                        fake_ctx = FakeContext()
+                        
+                        # TUNGGU LAGI untuk pastikan
+                        await asyncio.sleep(0.5)
+                        
+                        await play_next(fake_ctx)
+                        print(f"✅ Callback: Successfully triggered play_next")
+                    
+                except Exception as e:
+                    print(f"❌ Error in play_next_wrapper: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            asyncio.run_coroutine_threadsafe(play_next_wrapper(), bot.loop)
+        
+        # ====== PERBAIKAN 5: TRY-CATCH SAAT MEMULAI PLAYBACK ======
+        try:
+            # Set flag bahwa kita akan mulai playback
+            playback_started = True
+            
+            # Play dengan callback
+            voice_client.play(source, after=after_playing)
+            print(f"✅ Playing FRESH: {song.title}")
+            
+            # Update current song di guild player
+            guild_player = get_guild_player_by_id(guild_id)
+            if guild_player:
+                guild_player['current_song'] = song
+                guild_player['is_playing'] = True  # Tambah flag playing
+            
+            # ====== PERBAIKAN 6: VERIFIKASI PLAYBACK BENAR-BENAR MULAI ======
+            await asyncio.sleep(1)  # Tunggu 1 detik
+            
+            if not voice_client.is_playing():
+                print("⚠️ Playback didn't start after 1 second!")
+                if playback_error:
+                    raise Exception(f"Playback failed to start: {playback_error}")
                 else:
-                    print("🔄 AFTER_PLAYING - Skip was requested, not triggering next")
-                    guild_player['skip_requested'] = False
+                    # Coba stop dan start ulang
+                    voice_client.stop()
+                    await asyncio.sleep(0.5)
+                    
+                    # Coba buat source baru
+                    try:
+                        source2 = discord.FFmpegPCMAudio(url, **ffmpeg_opts)
+                        voice_client.play(source2, after=after_playing)
+                        print("🔄 Restarted playback with PCM")
+                    except Exception as restart_error:
+                        raise Exception(f"Failed to restart: {restart_error}")
             
-            voice_client.play(
-                discord.PCMVolumeTransformer(source, volume=volume), 
-                after=after_playing
-            )
+            return True
             
-            guild_player['current_song'] = song
-            print(f"✅ Now playing: {song.title}")
+        except Exception as play_error:
+            print(f"❌ Error starting playback: {play_error}")
+            playback_started = False
+            raise play_error
+        
+    except Exception as e:
+        print(f"❌ Error in play_song: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # ====== PERBAIKAN 7: KIRIM PESAN ERROR KE CHANNEL ======
+        if ctx and hasattr(ctx, 'channel'):
+            try:
+                error_msg = str(e)
+                if "search" in song.url.lower() and ("No audio URL" in error_msg or "No video found" in error_msg):
+                    await ctx.channel.send("❌ Tidak dapat menemukan lagu. Coba kata kunci yang lebih spesifik.")
+                else:
+                    await ctx.channel.send(f"❌ Error: {error_msg[:100]}")
+            except:
+                pass
+        
+        raise e
+    
+async def play_next(ctx=None, guild_id=None):
+    """Play next song in queue - FIXED VERSION"""
+    try:
+        print("🎵 PLAY_NEXT called")
+        
+        # Dapatkan guild_id
+        if guild_id is None:
+            if ctx is None:
+                print("❌ No context or guild_id provided")
+                return
+            guild_id = ctx.guild.id
+            voice_client = ctx.voice_client
+        else:
+            # Cari voice client berdasarkan guild_id
+            voice_client = None
+            for vc in bot.voice_clients:
+                if vc.guild.id == guild_id:
+                    voice_client = vc
+                    break
+            
+            if not voice_client:
+                print(f"❌ No voice client for guild {guild_id}")
+                return
+        
+        # Cek koneksi voice
+        if not voice_client or not voice_client.is_connected():
+            print(f"❌ Voice client not connected for guild {guild_id}")
+            return
+        
+        # Dapatkan guild player
+        guild_player = guild_players.get(guild_id)
+        if not guild_player:
+            print(f"❌ No guild player for guild {guild_id}")
+            return
+        
+        print(f"🎵 PLAY_NEXT - Guild: {guild_id}")
+        print(f"🎵 PLAY_NEXT - Current: {guild_player['current_song'].title if guild_player['current_song'] else 'None'}")
+        print(f"🎵 PLAY_NEXT - Queue: {len(guild_player['queue'])} songs")
+        
+        # Delay untuk menghindari race condition
+        await asyncio.sleep(0.5)
+        
+        # Reset skip flag jika ada
+        if 'skip_requested' in guild_player:
+            guild_player['skip_requested'] = False
+        
+        # LOGIC PEMUTARAN - SEDERHANA DAN PASTI BEKERJA
+        next_song = None
+        
+        # 1. Cek jika loop aktif
+        if guild_player.get('loop', False) and guild_player['current_song']:
+            next_song = guild_player['current_song']
+            print(f"🎵 PLAY_NEXT - Looping: {next_song.title}")
+        
+        # 2. Cek jika ada queue
+        elif guild_player['queue']:
+            next_song = guild_player['queue'].pop(0)
+            guild_player['current_song'] = next_song
+            print(f"🎵 PLAY_NEXT - Playing next from queue: {next_song.title}")
+            
+            # Jika loop queue aktif, tambahkan kembali ke akhir
+            if guild_player.get('loop_queue', False):
+                guild_player['queue'].append(next_song)
+                print(f"🎵 PLAY_NEXT - Added to queue loop")
+        
+        # 3. Tidak ada lagu berikutnya
+        else:
+            print(f"🎵 PLAY_NEXT - Queue empty")
+            guild_player['current_song'] = None
+            
+            # Kirim pesan ke channel jika ada
+            # if ctx and hasattr(ctx, 'channel'):
+            #     try:
+            #         await ctx.channel.send("🎵 Queue finished!")
+            #     except:
+            #         pass
+            
+            # Auto disconnect setelah beberapa saat
+            # async def auto_disconnect():
+            #     await asyncio.sleep(300)  # 5 menit
+            #     if voice_client.is_connected() and not voice_client.is_playing() and len(guild_player['queue']) == 0:
+            #         await voice_client.disconnect()
+            #         print(f"🔌 Auto-disconnected from guild {guild_id}")
+            
+            # asyncio.create_task(auto_disconnect())
+            return
+        
+        # Play lagu berikutnya
+        if next_song:
+            # Kirim pesan "Now Playing" jika ada context
+            if ctx and hasattr(ctx, 'channel'):
+                try:
+                    embed = discord.Embed(
+                        description=f"🎶 Now playing: [{next_song.title}]({next_song.url})",
+                        color=0x00ff00
+                    )
+                    embed.set_footer(text=f"Requested by {next_song.requester.display_name}")
+                    if next_song.thumbnail:
+                        embed.set_thumbnail(url=next_song.thumbnail)
+                    await ctx.channel.send(embed=embed)
+                except Exception as e:
+                    print(f"⚠️ Could not send now playing message: {e}")
+            
+            # Play song dengan context
+            await play_song(voice_client, next_song, ctx)
             
     except Exception as e:
-        print(f"Error playing song: {e}")
-        guild_player['is_playing'] = False
-        guild_player['skip_requested'] = False
-        await asyncio.sleep(1)
-        asyncio.run_coroutine_threadsafe(play_next_by_guild(guild_id), bot.loop)
+        print(f"❌ Error in play_next: {e}")
+        import traceback
+        traceback.print_exc()
 
-async def play_next_by_guild(guild_id):
-    """Play next song for specific guild - FIXED VERSION"""
-    for voice_client in bot.voice_clients:
-        if voice_client.guild.id == guild_id:
-            ctx = await get_context_from_guild(guild_id)
-            if ctx:
-                await play_next(ctx)
-            break
-
-async def play_next(ctx):
-    """Play next song in queue dengan state management"""
-    guild_player = get_guild_player(ctx)
-    voice_client = ctx.voice_client
-    
-    if not voice_client:
-        print("❌ PLAY_NEXT - No voice client")
-        return
-    
-    # Jika sedang dalam proses skip, jangan lanjutkan
-    if guild_player.get('skip_requested', False):
-        print("⚠️ PLAY_NEXT - Skip in progress, aborting")
-        return
-    
-    print(f"🎵 PLAY_NEXT - Current: {guild_player['current_song'].title if guild_player['current_song'] else 'None'}")
-    print(f"🎵 PLAY_NEXT - Queue: {len(guild_player['queue'])} songs")
-    
-    if guild_player['loop'] and guild_player['current_song']:
-        # Loop current song
-        print(f"🎵 PLAY_NEXT - Looping: {guild_player['current_song'].title}")
-        await play_song(voice_client, guild_player['current_song'])
-        
-    elif guild_player['queue']:
-        # Play next song in queue
-        next_song = guild_player['queue'].pop(0)
-        print(f"🎵 PLAY_NEXT - Playing: {next_song.title}")
-        await play_song(voice_client, next_song)
-        
-        # Jika loop queue, tambahkan kembali ke akhir queue
-        if guild_player['loop_queue']:
-            guild_player['queue'].append(next_song)
-            print(f"🎵 PLAY_NEXT - Queue loop: added {next_song.title}")
+async def play_next(ctx=None, guild_id=None):
+    """Play next song in queue dengan berbagai cara pemanggilan"""
+    try:
+        # Dapatkan guild_id dari parameter atau ctx
+        if guild_id is None:
+            if ctx is None:
+                print("❌ PLAY_NEXT - No context or guild_id provided")
+                return
             
-    else:
-        # No more songs
-        guild_player['current_song'] = None
-        print("🎵 PLAY_NEXT - Queue empty")
+            guild_id = ctx.guild.id
+            voice_client = ctx.voice_client
+            guild_player = get_guild_player(ctx)
+        else:
+            # Cari voice client berdasarkan guild_id
+            voice_client = None
+            for vc in bot.voice_clients:
+                if vc.guild.id == guild_id:
+                    voice_client = vc
+                    break
+            
+            if not voice_client:
+                print(f"❌ PLAY_NEXT - No voice client for guild {guild_id}")
+                return
+            
+            # Dapatkan guild_player dari storage
+            guild_player = guild_players.get(guild_id)
+            if not guild_player:
+                print(f"❌ PLAY_NEXT - No guild player for guild {guild_id}")
+                return
+        
+        # Cek jika voice_client masih valid
+        if not voice_client or not voice_client.is_connected():
+            print(f"❌ PLAY_NEXT - Voice client not connected for guild {guild_id}")
+            return
+        
+        # Cek jika sedang dalam proses skip
+        if guild_player.get('skip_requested', False):
+            print(f"⚠️ PLAY_NEXT - Skip in progress for guild {guild_id}, aborting")
+            guild_player['skip_requested'] = False
+            return
+        
+        print(f"🎵 PLAY_NEXT - Guild: {guild_id}")
+        print(f"🎵 PLAY_NEXT - Current: {guild_player['current_song'].title if guild_player['current_song'] else 'None'}")
+        print(f"🎵 PLAY_NEXT - Queue: {len(guild_player['queue'])} songs")
+        print(f"🎵 PLAY_NEXT - Loop: {guild_player['loop']}, Loop Queue: {guild_player['loop_queue']}")
+        
+        # Delay kecil untuk menghindari race condition
+        await asyncio.sleep(0.5)
+        
+        # Cek jika masih playing (kadang callback dipanggil tapi masih playing)
+        if voice_client.is_playing():
+            print(f"⚠️ PLAY_NEXT - Still playing, waiting...")
+            await asyncio.sleep(1)
+            if voice_client.is_playing():
+                print(f"❌ PLAY_NEXT - Still playing after wait, aborting")
+                return
+        
+        # LOGIC PEMUTARAN
+        if guild_player['loop'] and guild_player['current_song']:
+            # Loop current song
+            current_song = guild_player['current_song']
+            print(f"🎵 PLAY_NEXT - Looping: {current_song.title}")
+            await play_song(voice_client, current_song)
+            
+        elif guild_player['queue']:
+            # Play next song in queue
+            next_song = guild_player['queue'].pop(0)
+            guild_player['current_song'] = next_song
+            print(f"🎵 PLAY_NEXT - Playing next: {next_song.title}")
+            
+            # Update status di text channel jika ada
+            try:
+                if ctx and hasattr(ctx, 'channel'):
+                    embed = discord.Embed(
+                        description=f"🎶 Now playing: [{next_song.title}]({next_song.url})",
+                        color=0x00ff00
+                    )
+                    embed.set_footer(text=f"Requested by {next_song.requester.display_name if hasattr(next_song.requester, 'display_name') else 'Unknown'}")
+                    if next_song.thumbnail:
+                        embed.set_thumbnail(url=next_song.thumbnail)
+                    await ctx.channel.send(embed=embed)
+            except Exception as e:
+                print(f"⚠️ Could not send now playing message: {e}")
+            
+            await play_song(voice_client, next_song)
+            
+            # Jika loop queue, tambahkan kembali ke akhir queue
+            if guild_player['loop_queue']:
+                guild_player['queue'].append(next_song)
+                print(f"🎵 PLAY_NEXT - Queue loop: added {next_song.title} to end")
+                
+        else:
+            # No more songs
+            print(f"🎵 PLAY_NEXT - Queue empty for guild {guild_id}")
+            guild_player['current_song'] = None
+            
+            # Kirim message ke channel jika ada
+            try:
+                if ctx and hasattr(ctx, 'channel'):
+                    await ctx.channel.send("✅ Queue finished!")
+            except:
+                pass
+            
+            # Optionally disconnect after some time
+            # async def auto_disconnect():
+            #     await asyncio.sleep(300)  # 5 menit
+            #     if voice_client.is_connected() and not voice_client.is_playing() and not guild_player['queue']:
+            #         await voice_client.disconnect()
+            #         print(f"🔌 Auto-disconnected from guild {guild_id}")
+            
+            # asyncio.create_task(auto_disconnect())
+            
+    except Exception as e:
+        print(f"❌ Error in play_next: {e}")
+        import traceback
+        traceback.print_exc()
 
 # ============================
 # MEDIA DOWNLOAD FUNCTIONS
@@ -535,11 +897,76 @@ async def convert_video_simple_ffmpeg(input_path, output_path):
 # WAIFU SYSTEM FUNCTIONS
 # ============================
 
-async def handle_waifu_claim(ctx):
-    """Handle daily waifu claiming"""
+async def handle_waifu_claim(ctx, force_character=None):
+    """Handle daily waifu claiming dengan opsi force character untuk admin"""
     waifu_folder = "./images/waifu"
     claim_file = "claimed_waifus.json"
-
+    
+    # Daftar admin IDs (ganti dengan ID Discord kamu)
+    ADMIN_IDS = [869897744972668948]  # Ganti dengan ID Discord kamu
+    
+    # Jika ada force_character dan user adalah admin
+    if force_character and ctx.author.id in ADMIN_IDS:
+        user_id = str(ctx.author.id)
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        # Load data existing
+        if not os.path.exists(claim_file):
+            with open(claim_file, "w") as f:
+                json.dump({}, f)
+        
+        try:
+            with open(claim_file, "r") as f:
+                content = f.read().strip()
+                data = json.loads(content) if content else {}
+        except json.JSONDecodeError:
+            data = {}
+        
+        # Cari file yang sesuai dengan karakter yang diminta
+        waifus = [f for f in os.listdir(waifu_folder) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+        
+        # Normalisasi nama karakter yang diminta
+        force_character_lower = force_character.lower()
+        matching_files = []
+        
+        for waifu_file in waifus:
+            waifu_name = os.path.splitext(waifu_file)[0].lower()
+            # Cek apakah nama file mengandung karakter yang diminta
+            if force_character_lower in waifu_name:
+                matching_files.append(waifu_file)
+        
+        if not matching_files:
+            await ctx.send(f"❌ Tidak ditemukan karakter dengan nama **{force_character}** di folder waifu.")
+            return
+        
+        # Pilih file pertama yang cocok, atau random jika ada banyak
+        chosen = matching_files[0] if len(matching_files) == 1 else random.choice(matching_files)
+        waifu_name = os.path.splitext(chosen)[0].replace("_", " ").title()
+        
+        # Update data
+        old_data = data.get(user_id, {})
+        old_count = old_data.get("count", 0)
+        
+        data[user_id] = {
+            "date": today,
+            "waifu": waifu_name,
+            "count": old_count + 1,
+            "forced": True  # Flag untuk menandai ini force claim
+        }
+        
+        with open(claim_file, "w") as f:
+            json.dump(data, f, indent=4)
+        
+        await ctx.send(f"💘 Hari ini bebebmu adalah **{waifu_name}**! 💞")
+        
+        try:
+            await ctx.send(file=File(os.path.join(waifu_folder, chosen)))
+        except discord.HTTPException:
+            await ctx.send(f"⚠️ Gambar **{waifu_name}** terlalu besar untuk dikirim.")
+        
+        return
+    
+    # NORMAL CLAIM (kode asli)
     if not os.path.exists(waifu_folder):
         await ctx.send("📁 Folder waifu tidak ditemukan!")
         return
@@ -577,7 +1004,8 @@ async def handle_waifu_claim(ctx):
     data[user_id] = {
         "date": today,
         "waifu": waifu_name,
-        "count": old_count + 1
+        "count": old_count + 1,
+        "forced": False
     }
 
     with open(claim_file, "w") as f:
@@ -705,7 +1133,7 @@ async def on_message(message):
         "bedwar": "bising bodo aku nak tido",
         "my bebeb": "karbit bgt njeng",
         "reika": "ap sh manggil manggil, nanti bebeb nkj marah lho",
-        "saran lagu": "https://youtu.be/wQu64bXbncI?si=ZM4srvzDHEDo6Oqx",
+        "saran lagu": "https://youtu.be/UqFkguq89YU?si=CF6t_IEAlTnR3p9z",
         "kimi thread": "‼Kimi Thread ‼\nThis is going to be a thread on Kimi (also known as SakudaPikora, MrMolvanstress) and his inappropriate behavior with minors. As well as allowing minors into his discord server that is based off of his YouTube channel (which is very sexual in nature). I'm censoring the name of all minors to avoid exposing them to undesirables"    
     }
     
@@ -722,7 +1150,7 @@ async def on_message(message):
 
 @bot.command(aliases=['p'])
 async def play(ctx, *, query):
-    """Play a song or add to queue"""
+    """Play a song or add to queue - UPDATED"""
     if not YTDL_AVAILABLE:
         await ctx.send("❌ Music features are currently unavailable.")
         return
@@ -816,7 +1244,7 @@ async def play(ctx, *, query):
                     await status_msg.edit(content=f"❌ Playlist error: {str(e)}")
 
             else:
-                # Single song handling
+                # Single song handling - PASTIKAN CONTEXT DITERUSKAN
                 try:
                     with youtube_dl.YoutubeDL(ytdl_format_options) as ytdl_instance:
                         if clean_query.startswith(('http://', 'https://')):
@@ -852,7 +1280,8 @@ async def play(ctx, *, query):
                             await status_msg.edit(content=None, embed=embed)
                         else:
                             guild_player['current_song'] = song
-                            await play_song(ctx.voice_client, song)
+                            # ⭐⭐ PASTIKAN CONTEXT DITERUSKAN KE play_song ⭐⭐
+                            await play_song(ctx.voice_client, song, ctx)
                             embed = discord.Embed(
                                 description=f"🎶 Now playing: [{song.title}]({song.url})",
                                 color=0x00ff00
@@ -867,7 +1296,6 @@ async def play(ctx, *, query):
 
         except Exception as e:
             await status_msg.edit(content=f"❌ Unexpected error: {str(e)}")
-
 @bot.command(aliases=['q'])
 async def queue(ctx, page: int = 1):
     """Show current queue"""
@@ -941,58 +1369,29 @@ async def queue(ctx, page: int = 1):
 
 @bot.command(aliases=['s'])
 async def skip(ctx):
-    """Skip current song dengan state management"""
+    """Skip current song - FIXED VERSION"""
     voice_client = ctx.voice_client
     if not voice_client or not voice_client.is_playing():
         await ctx.send("ℹ️ Nothing is currently playing!")
         return
     
     guild_player = get_guild_player(ctx)
+    guild_id = ctx.guild.id
     
-    print(f"🔄 SKIP COMMAND - Current: {guild_player['current_song'].title if guild_player['current_song'] else 'None'}")
-    print(f"🔄 SKIP COMMAND - Queue: {[song.title for song in guild_player['queue']]}")
+    print(f"⏭️ SKIP - Current: {guild_player['current_song'].title if guild_player['current_song'] else 'None'}")
     
-    # Set skip flag dan stop current playback
+    # Set skip flag
     guild_player['skip_requested'] = True
+    
+    # Stop current playback
     voice_client.stop()
     
-    # Tunggu untuk state update
     await asyncio.sleep(0.5)
     
-    # Tentukan next song berdasarkan kondisi
-    next_song = None
-    status_msg = ""
+    # Langsung panggil play_next
+    await play_next(ctx)
     
-    if guild_player['loop'] and guild_player['current_song']:
-        # Loop current song
-        next_song = guild_player['current_song']
-        status_msg = "🔂 Looping current song"
-        print(f"🔄 SKIP - Looping: {next_song.title}")
-        
-    elif guild_player['queue']:
-        # Ambil next song dari queue
-        next_song = guild_player['queue'].pop(0)
-        status_msg = f"🎵 **{next_song.title}**"
-        print(f"🔄 SKIP - Playing next: {next_song.title}")
-        
-        # Jika loop queue, tambahkan current song ke akhir queue
-        if guild_player['loop_queue']:
-            guild_player['queue'].append(next_song)
-            print(f"🔄 SKIP - Added to queue loop: {next_song.title}")
-            
-    else:
-        # Queue kosong
-        guild_player['current_song'] = None
-        await ctx.send("⏭️ Skipped! 🎵 Queue is now empty.")
-        await ctx.message.add_reaction("⏭️")
-        print("🔄 SKIP - Queue empty")
-        return
-    
-    # Play the next song
-    if next_song:
-        await play_song(voice_client, next_song)
-        await ctx.send(f"⏭️ Skipped! Now playing: {status_msg}")
-        await ctx.message.add_reaction("⏭️")
+    await ctx.message.add_reaction("⏭️")
 
 @bot.command()
 async def loop(ctx):
@@ -1488,144 +1887,247 @@ async def convert_video_with_moviepy(input_path, output_path):
         await convert_video_with_ffmpeg(input_path, output_path)
 
 async def convert_video_with_ffmpeg(input_path, output_path):
-    """Convert video menggunakan ffmpeg langsung dengan pengaturan optimal"""
+    """Convert video ke GIF dengan 12 fps (12 frame per detik)"""
     import subprocess
     
     try:
-        # Dapatkan info video dulu
-        probe_cmd = [
-            'ffprobe', 
-            '-v', 'error',
-            '-select_streams', 'v:0',
-            '-show_entries', 'stream=width,height,duration,r_frame_rate',
-            '-of', 'csv=p=0',
-            input_path
-        ]
+        # Dapatkan info video dengan cara yang lebih reliable
+        print("Getting video info...")
         
-        result = subprocess.run(probe_cmd, capture_output=True, text=True)
+        # Coba dua cara untuk mendapatkan FPS
+        original_fps = 30  # Default
         
-        # Default values
-        width = 640
-        height = 360
-        duration = 15
-        original_fps = 30
+        # Cara 1: Dapatkan FPS dari metadata
+        try:
+            fps_cmd = [
+                'ffprobe',
+                '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=avg_frame_rate',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                input_path
+            ]
+            
+            fps_result = subprocess.run(fps_cmd, capture_output=True, text=True, timeout=10)
+            if fps_result.returncode == 0 and fps_result.stdout.strip():
+                fps_str = fps_result.stdout.strip()
+                if '/' in fps_str:
+                    num, den = fps_str.split('/')
+                    if num and den:
+                        original_fps = float(num) / float(den)
+                        print(f"Got FPS from metadata: {original_fps:.2f}")
+        except:
+            pass
         
-        if result.returncode == 0:
-            info = result.stdout.strip().split(',')
-            if len(info) >= 4:
-                try:
-                    width = int(info[0]) if info[0] else 640
-                except:
-                    width = 640
-                    
-                try:
-                    height = int(info[1]) if info[1] else 360
-                except:
-                    height = 360
-                    
-                try:
-                    duration = float(info[2]) if info[2] else 15
-                except:
-                    duration = 15
+        # Cara 2: Jika FPS aneh (< 10), coba dengan cara lain
+        if original_fps < 10:
+            print(f"Suspicious FPS ({original_fps:.2f}), trying alternative method...")
+            try:
+                # Cek FPS dengan cara menghitung frame
+                count_cmd = [
+                    'ffprobe',
+                    '-v', 'error',
+                    '-count_frames',
+                    '-select_streams', 'v:0',
+                    '-show_entries', 'stream=nb_read_frames,duration',
+                    '-of', 'csv=p=0',
+                    input_path
+                ]
                 
-                # Parse fps dengan benar
-                fps_str = info[3] if len(info) > 3 else "30/1"
-                try:
-                    if '/' in fps_str:
-                        num, den = fps_str.split('/')
-                        num = float(num) if num else 30.0
-                        den = float(den) if den else 1.0
-                        original_fps = num / den if den != 0 else 30.0
-                    else:
-                        original_fps = float(fps_str) if fps_str else 30.0
-                except:
-                    original_fps = 30.0
+                count_result = subprocess.run(count_cmd, capture_output=True, text=True, timeout=10)
+                if count_result.returncode == 0 and count_result.stdout.strip():
+                    parts = count_result.stdout.strip().split(',')
+                    if len(parts) >= 2:
+                        frames = float(parts[0]) if parts[0] and parts[0] != 'N/A' else 0
+                        duration = float(parts[1]) if parts[1] and parts[1] != 'N/A' else 0
+                        
+                        if frames > 0 and duration > 0:
+                            calculated_fps = frames / duration
+                            if calculated_fps > 5:  # Hanya percaya jika > 5 fps
+                                original_fps = calculated_fps
+                                print(f"Calculated FPS from frame count: {original_fps:.2f}")
+            except:
+                pass
         
-        # Batasi durasi
-        max_duration = 15
+        # Jika masih aneh, gunakan default 30 fps untuk video modern
+        if original_fps < 10:
+            print(f"FPS still too low ({original_fps:.2f}), using default 30 fps")
+            original_fps = 30
+        
+        # Dapatkan durasi
+        try:
+            duration_cmd = [
+                'ffprobe',
+                '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                input_path
+            ]
+            
+            duration_result = subprocess.run(duration_cmd, capture_output=True, text=True, timeout=10)
+            if duration_result.returncode == 0 and duration_result.stdout.strip():
+                duration = float(duration_result.stdout.strip())
+            else:
+                duration = 15  # Default
+        except:
+            duration = 15
+        
+        print(f"Final video info: duration={duration:.2f}s, fps={original_fps:.2f}")
+        
+        # BATASI DURASI MAKSIMAL 60 DETIK
+        max_duration = 60
         if duration > max_duration:
             duration = max_duration
         
-        # Hitung FPS optimal
-        fps = min(10, original_fps)
-        if fps < 1:  # Minimum 1 fps
-            fps = 5
+        # TARGET: 12 FRAME PER DETIK (12 FPS)
+        # TAPI untuk video pendek (< 2 detik), gunakan minimal 10 fps untuk smoothness
+        if duration < 2:
+            target_fps = 10
+        else:
+            target_fps = 12
         
-        # Hitung resolusi optimal
-        max_width = 480
+        # Gunakan fps yang lebih rendah antara target dan original
+        actual_fps = min(target_fps, original_fps)
+        
+        # Untuk video sangat pendek (< 1 detik), pastikan minimal 5 frame
+        if duration < 1:
+            min_frames = 5
+            required_fps = min_frames / duration
+            actual_fps = max(actual_fps, required_fps)
+        
+        # Batasi maksimal 30 fps untuk performa
+        actual_fps = min(actual_fps, 30)
+        
+        print(f"Using {actual_fps:.1f} fps for conversion")
+        
+        # Hitung resolusi (dinamis berdasarkan durasi)
+        if duration > 30:
+            max_width = 400  # Lebih kecil untuk video panjang
+        elif duration > 10:
+            max_width = 480
+        else:
+            max_width = 560  # Lebih besar untuk video pendek
+        
         scale_filter = f"scale={max_width}:-1:flags=lanczos"
-        if width <= max_width:
-            scale_filter = ""  # Tidak perlu resize
         
-        # Buat palette terlebih dahulu
-        temp_palette = output_path + "_palette.png"
-        
-        # Sederhanakan konversi untuk menghindari error kompleks
-        # Metode 1: Coba konversi langsung dulu (lebih cepat)
-        try:
+        # METODE 1: Untuk video pendek (< 5 detik), gunakan metode simple dulu
+        if duration < 5:
+            print("Short video detected, using simple method...")
+            
             simple_cmd = [
-                'ffmpeg', '-i', input_path,
-                '-t', str(min(10, duration)),  # Max 10 detik untuk metode simple
-                '-vf', f'fps={fps},scale={max_width}:-1:flags=lanczos',
+                'ffmpeg',
+                '-i', input_path,
+                '-t', str(duration),
+                '-vf', f"fps={actual_fps:.1f},{scale_filter}",
+                '-loop', '0',
+                '-gifflags', '+offsetting',
                 '-y', output_path
             ]
             
-            result = subprocess.run(simple_cmd, capture_output=True, text=True, timeout=45)
+            print(f"Running: {' '.join(simple_cmd)}")
+            result = subprocess.run(simple_cmd, capture_output=True, text=True, timeout=60)
             
-            if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                # Success dengan metode simple
-                return
+            if result.returncode == 0 and os.path.exists(output_path):
+                # Cek apakah GIF memiliki frame
+                check_cmd = [
+                    'ffprobe',
+                    '-v', 'error',
+                    '-count_frames',
+                    '-select_streams', 'v:0',
+                    '-show_entries', 'stream=nb_read_frames',
+                    '-of', 'default=noprint_wrappers=1:nokey=1',
+                    output_path
+                ]
                 
-        except:
-            pass  # Lanjut ke metode palette jika simple gagal
+                check_result = subprocess.run(check_cmd, capture_output=True, text=True)
+                if check_result.returncode == 0 and check_result.stdout.strip():
+                    frames = int(check_result.stdout.strip())
+                    print(f"GIF created with {frames} frames")
+                    
+                    if frames > 1:
+                        return
+                    else:
+                        print("Only 1 frame created, trying palette method...")
         
-        # Metode 2: Dengan palette (lebih bagus kualitasnya)
+        # METODE 2: Palette method (lebih baik untuk kualitas)
+        print("Using palette method for better quality...")
+        
+        # Buat palette dulu
+        palette_path = output_path + "_palette.png"
+        
         try:
-            # Generate palette
             palette_cmd = [
-                'ffmpeg', '-i', input_path,
-                '-t', str(min(15, duration)),
-                '-vf', f'fps={fps},scale={max_width}:-1:flags=lanczos,palettegen=stats_mode=diff',
-                '-y', temp_palette
+                'ffmpeg',
+                '-i', input_path,
+                '-t', str(duration),
+                '-vf', f"fps={actual_fps:.1f},{scale_filter},palettegen=max_colors=128:stats_mode=diff",
+                '-y', palette_path
             ]
             
-            subprocess.run(palette_cmd, capture_output=True, timeout=30)
+            print("Generating palette...")
+            subprocess.run(palette_cmd, capture_output=True, timeout=60)
             
-            # Konversi ke GIF dengan palette
+            if not os.path.exists(palette_path):
+                raise Exception("Failed to generate palette")
+            
+            # Buat GIF dengan palette
             gif_cmd = [
-                'ffmpeg', '-i', input_path,
-                '-i', temp_palette,
-                '-t', str(min(15, duration)),
-                '-lavfi', f'fps={fps},scale={max_width}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=2',
+                'ffmpeg',
+                '-i', input_path,
+                '-i', palette_path,
+                '-t', str(duration),
+                '-lavfi', f"fps={actual_fps:.1f},{scale_filter}[x];[x][1:v]paletteuse=dither=none",
+                '-loop', '0',
+                '-gifflags', '+offsetting',
                 '-y', output_path
             ]
             
-            subprocess.run(gif_cmd, capture_output=True, timeout=60)
+            print("Creating GIF with palette...")
+            result = subprocess.run(gif_cmd, capture_output=True, text=True, timeout=90)
             
-        except Exception as e:
-            print(f"Palette method failed: {e}")
-            # Coba metode super simple sebagai last resort
-            try:
-                super_simple_cmd = [
-                    'ffmpeg', '-i', input_path,
-                    '-t', '5',  # Hanya 5 detik
-                    '-vf', 'scale=320:-1',
-                    '-r', '20',  # 8 fps
+        finally:
+            # Cleanup palette
+            if os.path.exists(palette_path):
+                try:
+                    os.remove(palette_path)
+                except:
+                    pass
+        
+        # Verifikasi hasil
+        if not os.path.exists(output_path):
+            raise Exception("Failed to create GIF file")
+        
+        # Cek frame count final
+        final_check_cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-count_frames',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=nb_read_frames',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            output_path
+        ]
+        
+        final_result = subprocess.run(final_check_cmd, capture_output=True, text=True)
+        if final_result.returncode == 0 and final_result.stdout.strip():
+            frames = int(final_result.stdout.strip())
+            print(f"Final GIF: {frames} frames")
+            
+            if frames <= 1:
+                # Last resort: force minimum frames
+                print("Forcing minimum frames...")
+                force_cmd = [
+                    'ffmpeg',
+                    '-i', input_path,
+                    '-vf', f"fps=10,{scale_filter}",  # Force 10 fps
+                    '-frames:v', '10',  # Force 10 frames
+                    '-loop', '0',
                     '-y', output_path
                 ]
-                subprocess.run(super_simple_cmd, capture_output=True, timeout=30)
-            except:
-                raise Exception("Semua metode konversi gagal")
-        
-        # Clean up
-        if os.path.exists(temp_palette):
-            try:
-                os.remove(temp_palette)
-            except:
-                pass
+                subprocess.run(force_cmd, capture_output=True, timeout=60)
             
     except subprocess.TimeoutExpired:
-        raise Exception("Konversi video timeout. Coba video yang lebih pendek (max 10 detik).")
+        raise Exception("Konversi timeout. Coba video yang lebih pendek.")
     except Exception as e:
         raise Exception(f"Video conversion error: {str(e)}")
     
@@ -1656,9 +2158,63 @@ async def convert_image_simple_fallback(input_path, output_path):
 # ============================
 
 @bot.command(name="claim")
-async def claim_waifu(ctx):
-    """Claim daily waifu"""
-    await handle_waifu_claim(ctx)
+async def claim_waifu(ctx, *, character_name: str = None):
+    """Claim daily waifu dengan opsi force character untuk admin
+    
+    Usage:
+    !claim - Claim random waifu
+    !claim naseshi - Admin bisa force claim karakter tertentu
+    """
+    await handle_waifu_claim(ctx, character_name)
+
+
+# TAMBAHKAN COMMAND UNTUK CEK KARAKTER YANG ADA
+@bot.command(name="waifulist")
+async def waifu_list(ctx, *, search: str = None):
+    """List semua waifu yang tersedia, bisa filter dengan nama"""
+    waifu_folder = "./images/waifu"
+    
+    if not os.path.exists(waifu_folder):
+        await ctx.send("📁 Folder waifu tidak ditemukan!")
+        return
+    
+    waifus = [f for f in os.listdir(waifu_folder) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+    
+    if not waifus:
+        await ctx.send("⚠️ Tidak ada gambar waifu di folder.")
+        return
+    
+    # Filter jika ada search term
+    if search:
+        search_lower = search.lower()
+        filtered_waifus = []
+        for waifu_file in waifus:
+            waifu_name = os.path.splitext(waifu_file)[0].lower()
+            if search_lower in waifu_name:
+                filtered_waifus.append(waifu_file)
+        
+        if not filtered_waifus:
+            await ctx.send(f"❌ Tidak ditemukan waifu dengan nama **{search}**")
+            return
+        
+        waifus = filtered_waifus
+    
+    # Format list
+    waifu_names = []
+    for waifu_file in waifus[:50]:  # Limit 50 untuk menghindari message terlalu panjang
+        waifu_name = os.path.splitext(waifu_file)[0].replace("_", " ").title()
+        waifu_names.append(f"• {waifu_name}")
+    
+    embed = discord.Embed(
+        title="📋 List Waifu Tersedia" + (f" (Filter: {search})" if search else ""),
+        description="\n".join(waifu_names),
+        color=0xff69b4
+    )
+    
+    if len(waifus) > 50:
+        embed.set_footer(text=f"Menampilkan 50 dari {len(waifus)} waifu")
+    
+    await ctx.send(embed=embed)
 
 @bot.command(name="resetclaim")
 async def reset_claim_user(ctx, member: discord.Member = None):
