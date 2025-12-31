@@ -1,3 +1,3 @@
 @echo off
-python musicbot.py
+python bot.py
 pause

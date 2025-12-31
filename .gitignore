@@ -6,4 +6,7 @@ claimed_waifus.json
 __pycache__
 claims.json
 .venv
+.venv2
+venv2/
+admin_waifu_ovveride.json
 cookies.txt
