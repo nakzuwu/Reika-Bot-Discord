@@ -29,7 +29,7 @@ Create venv (Optional)
 ```bash
 //windows
 venv/Script/activate
-//
+//linux
 source venv/bin/activate
 ```
 
@@ -54,6 +54,7 @@ You can run it simply run
 ```bash
 python bot.py
 ```
+
 
 
 
