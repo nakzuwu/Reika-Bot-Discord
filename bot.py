@@ -446,100 +446,100 @@ async def play_song(voice_client, song, ctx=None):
         
         raise e
     
-async def play_next(ctx=None, guild_id=None):
-    """Play next song in queue - FIXED VERSION"""
-    try:
-        print("🎵 PLAY_NEXT called")
+# async def play_next(ctx=None, guild_id=None):
+#     """Play next song in queue - FIXED VERSION"""
+#     try:
+#         print("🎵 PLAY_NEXT called")
         
-        # Dapatkan guild_id
-        if guild_id is None:
-            if ctx is None:
-                print("❌ No context or guild_id provided")
-                return
-            guild_id = ctx.guild.id
-            voice_client = ctx.voice_client
-        else:
-            # Cari voice client berdasarkan guild_id
-            voice_client = None
-            for vc in bot.voice_clients:
-                if vc.guild.id == guild_id:
-                    voice_client = vc
-                    break
+#         # Dapatkan guild_id
+#         if guild_id is None:
+#             if ctx is None:
+#                 print("❌ No context or guild_id provided")
+#                 return
+#             guild_id = ctx.guild.id
+#             voice_client = ctx.voice_client
+#         else:
+#             # Cari voice client berdasarkan guild_id
+#             voice_client = None
+#             for vc in bot.voice_clients:
+#                 if vc.guild.id == guild_id:
+#                     voice_client = vc
+#                     break
             
-            if not voice_client:
-                print(f"❌ No voice client for guild {guild_id}")
-                return
+#             if not voice_client:
+#                 print(f"❌ No voice client for guild {guild_id}")
+#                 return
         
-        # Cek koneksi voice
-        if not voice_client or not voice_client.is_connected():
-            print(f"❌ Voice client not connected for guild {guild_id}")
-            return
+#         # Cek koneksi voice
+#         if not voice_client or not voice_client.is_connected():
+#             print(f"❌ Voice client not connected for guild {guild_id}")
+#             return
         
-        # Dapatkan guild player
-        guild_player = guild_players.get(guild_id)
-        if not guild_player:
-            print(f"❌ No guild player for guild {guild_id}")
-            return
+#         # Dapatkan guild player
+#         guild_player = guild_players.get(guild_id)
+#         if not guild_player:
+#             print(f"❌ No guild player for guild {guild_id}")
+#             return
         
-        print(f"🎵 PLAY_NEXT - Guild: {guild_id}")
-        print(f"🎵 PLAY_NEXT - Current: {guild_player['current_song'].title if guild_player['current_song'] else 'None'}")
-        print(f"🎵 PLAY_NEXT - Queue: {len(guild_player['queue'])} songs")
+#         print(f"🎵 PLAY_NEXT - Guild: {guild_id}")
+#         print(f"🎵 PLAY_NEXT - Current: {guild_player['current_song'].title if guild_player['current_song'] else 'None'}")
+#         print(f"🎵 PLAY_NEXT - Queue: {len(guild_player['queue'])} songs")
         
-        # Delay untuk menghindari race condition
-        await asyncio.sleep(0.5)
+#         # Delay untuk menghindari race condition
+#         await asyncio.sleep(0.5)
         
-        # Reset skip flag jika ada
-        if 'skip_requested' in guild_player:
-            guild_player['skip_requested'] = False
+#         # Reset skip flag jika ada
+#         if 'skip_requested' in guild_player:
+#             guild_player['skip_requested'] = False
         
-        # LOGIC PEMUTARAN - SEDERHANA DAN PASTI BEKERJA
-        next_song = None
+#         # LOGIC PEMUTARAN - SEDERHANA DAN PASTI BEKERJA
+#         next_song = None
         
-        # 1. Cek jika loop aktif
-        if guild_player.get('loop', False) and guild_player['current_song']:
-            next_song = guild_player['current_song']
-            print(f"🎵 PLAY_NEXT - Looping: {next_song.title}")
+#         # 1. Cek jika loop aktif
+#         if guild_player.get('loop', False) and guild_player['current_song']:
+#             next_song = guild_player['current_song']
+#             print(f"🎵 PLAY_NEXT - Looping: {next_song.title}")
         
-        # 2. Cek jika ada queue
-        elif guild_player['queue']:
-            next_song = guild_player['queue'].pop(0)
-            guild_player['current_song'] = next_song
-            print(f"🎵 PLAY_NEXT - Playing next from queue: {next_song.title}")
+#         # 2. Cek jika ada queue
+#         elif guild_player['queue']:
+#             next_song = guild_player['queue'].pop(0)
+#             guild_player['current_song'] = next_song
+#             print(f"🎵 PLAY_NEXT - Playing next from queue: {next_song.title}")
             
-            # Jika loop queue aktif, tambahkan kembali ke akhir
-            if guild_player.get('loop_queue', False):
-                guild_player['queue'].append(next_song)
-                print(f"🎵 PLAY_NEXT - Added to queue loop")
+#             # Jika loop queue aktif, tambahkan kembali ke akhir
+#             if guild_player.get('loop_queue', False):
+#                 guild_player['queue'].append(next_song)
+#                 print(f"🎵 PLAY_NEXT - Added to queue loop")
         
-        # 3. Tidak ada lagu berikutnya
-        else:
-            print(f"🎵 PLAY_NEXT - Queue empty")
-            guild_player['current_song'] = None
-            return
+#         # 3. Tidak ada lagu berikutnya
+#         else:
+#             print(f"🎵 PLAY_NEXT - Queue empty")
+#             guild_player['current_song'] = None
+#             return
         
-        # Play lagu berikutnya
-        if next_song:
-            # Kirim pesan "Now Playing" jika ada context
-            if ctx and hasattr(ctx, 'channel'):
-                try:
-                    embed = discord.Embed(
-                        description=f"🎶 Now playing: [{next_song.title}]({next_song.url})",
-                        color=0x00ff00
-                    )
-                    embed.set_footer(text=f"Requested by {next_song.requester.display_name}")
-                    if next_song.thumbnail:
-                        embed.set_thumbnail(url=next_song.thumbnail)
-                    await ctx.channel.send(embed=embed)
-                except Exception as e:
-                    print(f"⚠️ Could not send now playing message: {e}")
+#         # Play lagu berikutnya
+#         if next_song:
+#             # Kirim pesan "Now Playing" jika ada context
+#             if ctx and hasattr(ctx, 'channel'):
+#                 try:
+#                     embed = discord.Embed(
+#                         description=f"🎶 Now playing: [{next_song.title}]({next_song.url})",
+#                         color=0x00ff00
+#                     )
+#                     embed.set_footer(text=f"Requested by {next_song.requester.display_name}")
+#                     if next_song.thumbnail:
+#                         embed.set_thumbnail(url=next_song.thumbnail)
+#                     await ctx.channel.send(embed=embed)
+#                 except Exception as e:
+#                     print(f"⚠️ Could not send now playing message: {e}")
             
-            # Play song dengan context
-            await play_song(voice_client, next_song, ctx)
+#             # Play song dengan context
+#             await play_song(voice_client, next_song, ctx)
             
-    except Exception as e:
-        print(f"❌ Error in play_next: {e}")
-        import traceback
-        traceback.print_exc()
+#     except Exception as e:
+#         print(f"❌ Error in play_next: {e}")
+#         import traceback
+#         traceback.print_exc()
 
 async def play_next(ctx=None, guild_id=None):
     """Play next song in queue dengan berbagai cara pemanggilan"""
@@ -611,9 +611,29 @@ async def play_next(ctx=None, guild_id=None):
             guild_player['current_song'] = next_song
             print(f"🎵 PLAY_NEXT - Playing next: {next_song.title}")
             
-            # Update status di text channel jika ada
+            # Update status di text channel yang benar
             try:
-                if ctx and hasattr(ctx, 'channel'):
+                # Get the text channel from guild_player (preferred) or from ctx
+                text_channel = None
+                
+                # Option 1: Use stored text channel
+                if guild_player.get('text_channel'):
+                    text_channel = guild_player['text_channel']
+                # Option 2: Use ctx if available
+                elif ctx and hasattr(ctx, 'channel'):
+                    text_channel = ctx.channel
+                    # Also update the stored text channel
+                    guild_player['text_channel'] = text_channel
+                # Option 3: Try to find any text channel the bot can send to
+                else:
+                    # Get the first text channel the bot can send messages to
+                    guild = voice_client.guild
+                    for channel in guild.text_channels:
+                        if channel.permissions_for(guild.me).send_messages:
+                            text_channel = channel
+                            break
+                
+                if text_channel:
                     embed = discord.Embed(
                         description=f"🎶 Now playing: [{next_song.title}]({next_song.url})",
                         color=0x00ff00
@@ -621,7 +641,7 @@ async def play_next(ctx=None, guild_id=None):
                     embed.set_footer(text=f"Requested by {next_song.requester.display_name if hasattr(next_song.requester, 'display_name') else 'Unknown'}")
                     if next_song.thumbnail:
                         embed.set_thumbnail(url=next_song.thumbnail)
-                    await ctx.channel.send(embed=embed)
+                    await text_channel.send(embed=embed)
             except Exception as e:
                 print(f"⚠️ Could not send now playing message: {e}")
             
@@ -636,12 +656,6 @@ async def play_next(ctx=None, guild_id=None):
             # No more songs
             print(f"🎵 PLAY_NEXT - Queue empty for guild {guild_id}")
             guild_player['current_song'] = None
-            
-            # # Kirim message ke channel jika ada
-            # try:
-            #     if ctx and hasattr(ctx, 'channel'):
-            # except:
-            #     pass
             
     except Exception as e:
         print(f"❌ Error in play_next: {e}")
@@ -1318,7 +1332,7 @@ async def queue(ctx, page: int = 1):
         return
 
     # Tentukan jumlah item per halaman
-    items_per_page = 10  # Bisa diganti sesuai preferensi
+    items_per_page = 8  # Reduced from 10 to be safer
     total_songs = len(guild_player['queue'])
     total_pages = max(1, (total_songs + items_per_page - 1) // items_per_page)
     
@@ -1360,15 +1374,22 @@ async def queue(ctx, page: int = 1):
                 song = guild_player['queue'][i]
                 position = i + 1
                 
-                # Format song entry
-                song_text = f"[{song.title}]({song.url})"
-                if len(song_text) > 80:
-                    song_text = f"{song.title[:60]}... (click for full)"
+                # Format song entry dengan truncation yang aman
+                song_title = song.title
+                # Truncate title if too long
+                if len(song_title) > 60:
+                    song_title = f"{song_title[:57]}..."
                 
-                queue_text += (
-                    f"`{position}.` {song_text}\n"
-                    f"    ⏳ {song.format_duration()} | 👤 {song.requester.display_name}\n"
-                )
+                # Build the entry
+                entry = f"`{position}.` [{song_title}]({song.url})\n"
+                entry += f"    ⏳ {song.format_duration()} | 👤 {song.requester.display_name}\n"
+                
+                # Check if adding this entry would exceed the limit
+                if len(queue_text) + len(entry) > 1000:  # Leave some buffer
+                    queue_text += f"\n*... and {end - i} more songs*"
+                    break
+                
+                queue_text += entry
             
             # Jika ada text, tambahkan ke embed
             if queue_text:

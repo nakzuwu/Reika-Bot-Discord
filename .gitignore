@@ -1,4 +1,5 @@
 config.py
+config2.py
 venv/
 fix
 bot_bans.json
