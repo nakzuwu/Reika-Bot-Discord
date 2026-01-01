@@ -4,7 +4,7 @@ Reika Bot is bot inspired from whatsapp bot Hayasaka by Dendy. We have anime, mu
 
 ## Installation
 
-Download Python v 3.9 or newer (3.12 recommended)
+Download Python v 3.9 or newer (3.11 recommended)
 
 https://www.python.org/downloads/release/python-3110/ or https://apps.microsoft.com/detail/9NRWMJP3717K?hl=en-us&gl=ID&ocid=pdpshare
 
@@ -24,6 +24,15 @@ Create venv (Optional)
 python -m venv venv
 ```
 
+Create venv (Optional)
+
+```bash
+//windows
+venv/Script/activate
+//
+source venv/bin/activate
+```
+
 Install the requirements.
 
 ```bash
@@ -35,6 +44,7 @@ Create config.py in your folder.
 ```bash
 BOT_TOKEN = 'Your_bot_token' //copy your bot token from discord console https://discord.com/developers/applications
 PREFIX = 'n.' //add your own previx like m! or n.
+GENIUS_API_KEY = '' //copy your genius api key for lyrics feature https://docs.genius.com/
 ```
 
 ## Usage
@@ -42,16 +52,8 @@ PREFIX = 'n.' //add your own previx like m! or n.
 You can run it simply run
 
 ```bash
-python musicbot.py
+python bot.py
 ```
 
-OR
 
-If you a windows user, u can just click startbot.bat. You can make the bot automatically run simply by add the startbot.bat file into your startup folder (C:\Users\yourUser\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup) and add the line
 
-```bash
-@echo off
-cd /d "Directoty\to\your\Bot Music" //add your directory
-python musicbot.py
-pause
-```
